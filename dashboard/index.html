@@ -1,0 +1,60 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>zeitgeist — the world, becoming a graph</title>
+  <script src="https://unpkg.com/force-graph@1.49.5/dist/force-graph.min.js"></script>
+  <style>
+    body { margin: 0; background: #0b0e14; color: #e6e6e6; font-family: ui-monospace, monospace; }
+    #hud { position: fixed; top: 12px; left: 16px; z-index: 10; }
+    #hud h1 { font-size: 16px; margin: 0 0 4px; }
+    #hud .stat { color: #7fd4a3; }
+  </style>
+</head>
+<body>
+  <div id="hud">
+    <h1>zeitgeist</h1>
+    <div>entities: <span id="entities" class="stat">–</span>
+         events: <span id="events" class="stat">–</span></div>
+  </div>
+  <div id="graph"></div>
+  <script>
+    const nodes = new Map();
+    const links = [];
+    const graph = ForceGraph()(document.getElementById("graph"))
+      .backgroundColor("#0b0e14")
+      .nodeLabel("id")
+      .nodeColor(() => "#7fd4a3")
+      .linkColor(() => "#3a4a5a")
+      .graphData({ nodes: [], links: [] });
+
+    function ensureNode(name) {
+      if (!nodes.has(name)) nodes.set(name, { id: name });
+      return nodes.get(name);
+    }
+
+    function addClaim(claim) {
+      ensureNode(claim.subject);
+      if (claim.object) {
+        ensureNode(claim.object);
+        links.push({ source: claim.subject, target: claim.object, relation: claim.relation });
+      }
+      if (nodes.size > 800) return; // Phase 1 sanity cap for the browser
+      graph.graphData({ nodes: [...nodes.values()], links });
+    }
+
+    const proto = location.protocol === "https:" ? "wss" : "ws";
+    const ws = new WebSocket(`${proto}://${location.host}/ws/claims`);
+    ws.onmessage = (msg) => addClaim(JSON.parse(msg.data));
+
+    async function refreshStats() {
+      const res = await fetch("/stats");
+      const s = await res.json();
+      document.getElementById("entities").textContent = s.entities;
+      document.getElementById("events").textContent = s.events;
+    }
+    refreshStats();
+    setInterval(refreshStats, 10000);
+  </script>
+</body>
+</html>
