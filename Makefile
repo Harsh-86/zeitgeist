@@ -13,4 +13,4 @@ down:
 	docker compose -f docker/docker-compose.yml down
 
 smoke:
-	uv run python scripts/smoke_test.py
+	KAFKA_BOOTSTRAP=localhost:29092 uv run python scripts/smoke_test.py
