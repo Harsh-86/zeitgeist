@@ -31,3 +31,6 @@ markers = ["integration: requires Docker (testcontainers)"]
 
 [tool.ruff]
 line-length = 100
+
+[tool.ruff.lint]
+extend-select = ["E501"]

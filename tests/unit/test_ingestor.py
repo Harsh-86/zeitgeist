@@ -1,5 +1,5 @@
 from tests.unit.test_parser import make_row
-from zeitgeist.ingestor.main import IngestorState, run_cycle
+from zeitgeist.ingestor.main import DeliveryTracker, IngestorState, run_cycle
 
 
 class FakeGdeltClient:
@@ -21,7 +21,9 @@ def make_state(tmp_path):
 def test_run_cycle_publishes_parsed_events(tmp_path):
     sent = []
     client = FakeGdeltClient("http://x/1.export.CSV.zip", [make_row(), "malformed\trow"])
-    published, skipped = run_cycle(client, make_state(tmp_path), lambda t, k, v: sent.append((t, k)))
+    published, skipped = run_cycle(
+        client, make_state(tmp_path), lambda t, k, v: sent.append((t, k))
+    )
     assert published == 1
     assert skipped == 1
     assert sent == [("raw.events", "1234567890")]
@@ -80,3 +82,42 @@ def test_run_cycle_without_flush_still_saves_state(tmp_path):
     assert skipped == 0
     # State should be saved when flush is not provided
     assert state.last_url == "http://x/1.export.CSV.zip"
+
+
+def test_delivery_tracker_counts_failed_deliveries():
+    """on_delivery increments failed only when an error is reported."""
+    tracker = DeliveryTracker()
+    tracker.on_delivery(None, "msg-ok")
+    assert tracker.failed == 0
+    tracker.on_delivery(Exception("boom"), "msg-bad")
+    assert tracker.failed == 1
+    tracker.on_delivery(Exception("boom again"), "msg-bad-2")
+    assert tracker.failed == 2
+
+
+def test_delivery_tracker_reset_clears_failed_count():
+    tracker = DeliveryTracker()
+    tracker.on_delivery(Exception("boom"), "msg-bad")
+    assert tracker.failed == 1
+    tracker.reset()
+    assert tracker.failed == 0
+
+
+def test_run_cycle_blocks_state_advance_when_hard_failures_counted_via_flush(tmp_path):
+    """Simulates main()'s flush() wiring: producer.flush() returns 0 remaining in the
+    queue (message was dequeued via the error callback) but the tracked failure count
+    is added in, so run_cycle still sees undelivered > 0 and does not advance state.
+    """
+    state = make_state(tmp_path)
+    client = FakeGdeltClient("http://x/1.export.CSV.zip", [make_row()])
+    tracker = DeliveryTracker()
+    tracker.on_delivery(Exception("hard failure"), "msg-bad")
+
+    def flush() -> int:
+        producer_flush_remaining = 0  # e.g. producer.flush(30) returning 0
+        return producer_flush_remaining + tracker.failed
+
+    published, skipped = run_cycle(client, state, lambda t, k, v: None, flush=flush)
+    assert published == 1
+    assert skipped == 0
+    assert state.last_url is None

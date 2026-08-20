@@ -14,4 +14,4 @@ make test    # unit tests
 make smoke   # end-to-end smoke test
 ```
 
-Design spec: `docs/superpowers/specs/2026-08-18-zeitgeist-design.md`
+Operations: see [RUNBOOK.md](RUNBOOK.md)

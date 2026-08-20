@@ -8,6 +8,7 @@ REMOTE_DIR="~/zeitgeist"
 rsync -az --delete \
   --exclude .git --exclude .venv --exclude .pytest_cache --exclude .ruff_cache \
   --exclude state --exclude data \
+  --exclude docs --exclude .superpowers --exclude .claude --exclude .env \
   ./ "$HOST:$REMOTE_DIR/"
 
 ssh "$HOST" "cd $REMOTE_DIR && docker compose -f docker/docker-compose.yml up -d --build"

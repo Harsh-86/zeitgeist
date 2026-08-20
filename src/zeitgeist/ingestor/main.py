@@ -18,6 +18,27 @@ logger = logging.getLogger("zeitgeist.ingestor")
 Send = Callable[[str, str, bytes], None]
 
 
+class DeliveryTracker:
+    """Counts hard-failed Kafka deliveries reported via the producer's on_delivery callback.
+
+    Producer.flush() only returns the remaining queue length, which can be 0 even when
+    messages were dequeued due to a delivery error (not actually delivered). Tracking
+    failures separately lets callers add them to flush()'s return value so undelivered
+    counts are never silently dropped.
+    """
+
+    def __init__(self) -> None:
+        self.failed = 0
+
+    def on_delivery(self, err, msg) -> None:
+        if err is not None:
+            self.failed += 1
+            logger.error("delivery failed: %s", err)
+
+    def reset(self) -> None:
+        self.failed = 0
+
+
 class IngestorState:
     def __init__(self, path: Path) -> None:
         self._path = Path(path)
@@ -69,17 +90,19 @@ def main() -> None:
     client = GdeltClient(httpx.Client())
     state = IngestorState(Path(settings.state_path))
     producer = make_producer(settings.kafka_bootstrap)
-
-    def on_delivery(err, msg):
-        if err is not None:
-            logger.error("delivery failed: %s", err)
+    tracker = DeliveryTracker()
 
     def send(topic: str, key: str, value: bytes) -> None:
-        producer.produce(topic, key=key, value=value, on_delivery=on_delivery)
+        producer.produce(topic, key=key, value=value, on_delivery=tracker.on_delivery)
+
+    def flush() -> int:
+        undelivered = producer.flush(30) + tracker.failed
+        tracker.reset()
+        return undelivered
 
     while True:
         try:
-            run_cycle(client, state, send, flush=lambda: producer.flush(30))
+            run_cycle(client, state, send, flush=flush)
         except Exception:
             logger.exception("cycle failed; retrying next interval")
         time.sleep(settings.poll_interval_seconds)

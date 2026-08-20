@@ -25,13 +25,19 @@ def main() -> None:
     consumer = make_consumer(settings.kafka_bootstrap, RAW_TOPIC, group_id="extractor")
     producer = make_producer(settings.kafka_bootstrap)
     logger.info("extractor consuming %s", RAW_TOPIC)
-    while True:
-        message = consumer.poll(1.0)
-        if message is None or message.error():
-            continue
-        for payload in process_message(message.value()):
-            producer.produce(CLAIMS_TOPIC, key=message.key(), value=payload)
-        producer.poll(0)
+    try:
+        while True:
+            message = consumer.poll(1.0)
+            if message is None:
+                continue
+            if message.error():
+                logger.warning("consumer error: %s", message.error())
+                continue
+            for payload in process_message(message.value()):
+                producer.produce(CLAIMS_TOPIC, key=message.key(), value=payload)
+            producer.poll(0)
+    finally:
+        producer.flush(10)
 
 
 if __name__ == "__main__":
