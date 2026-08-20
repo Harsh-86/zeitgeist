@@ -27,6 +27,7 @@ packages = ["src/zeitgeist"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = ["integration: requires Docker (testcontainers)"]
 
 [tool.ruff]
 line-length = 100
