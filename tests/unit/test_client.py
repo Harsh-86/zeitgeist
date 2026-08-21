@@ -1,9 +1,16 @@
 import io
 import zipfile
+from datetime import datetime, timedelta
 
 import httpx
 
-from zeitgeist.gdelt.client import LASTUPDATE_URL, GdeltClient
+from zeitgeist.gdelt.client import (
+    LASTUPDATE_URL,
+    GdeltClient,
+    export_url_for,
+    stamp_from_url,
+    stamps_between,
+)
 
 EXPORT_URL = "http://data.gdeltproject.org/gdeltv2/20260818143000.export.CSV.zip"
 
@@ -53,3 +60,50 @@ def test_fetch_rows_yields_lines_from_zip():
 
     rows = list(make_client(handler).fetch_rows(EXPORT_URL))
     assert rows == ["row1\tcol", "row2\tcol"]
+
+
+def test_stamp_from_url_extracts_the_14_digit_stamp():
+    assert stamp_from_url(EXPORT_URL) == "20260818143000"
+
+
+def test_stamp_from_url_returns_none_for_garbage():
+    assert stamp_from_url("not a url at all") is None
+    assert stamp_from_url("https://data.gdeltproject.org/gdeltv2/lastupdate.txt") is None
+
+
+def test_export_url_for_round_trips_with_stamp_from_url():
+    stamp = "20260818143000"
+    url = export_url_for(stamp)
+    assert url == "https://data.gdeltproject.org/gdeltv2/20260818143000.export.CSV.zip"
+    assert stamp_from_url(url) == stamp
+
+
+def test_stamps_between_normal_gap():
+    assert stamps_between("20260818140000", "20260818150000") == [
+        "20260818141500",
+        "20260818143000",
+        "20260818144500",
+        "20260818150000",
+    ]
+
+
+def test_stamps_between_empty_when_latest_equal_to_last():
+    assert stamps_between("20260818140000", "20260818140000") == []
+
+
+def test_stamps_between_empty_when_latest_before_last():
+    assert stamps_between("20260818150000", "20260818140000") == []
+
+
+def test_stamps_between_caps_at_672_keeping_newest():
+    last = "20260101000000"
+    last_dt = datetime.strptime(last, "%Y%m%d%H%M%S")  # noqa: DTZ007
+    latest_dt = last_dt + timedelta(minutes=15 * 1000)  # far beyond the 7-day cap
+    latest = latest_dt.strftime("%Y%m%d%H%M%S")
+
+    result = stamps_between(last, latest)
+
+    assert len(result) == 672
+    assert result[-1] == latest
+    expected_first = (latest_dt - timedelta(minutes=15 * 671)).strftime("%Y%m%d%H%M%S")
+    assert result[0] == expected_first

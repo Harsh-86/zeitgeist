@@ -7,13 +7,13 @@ def make_producer(bootstrap: str) -> Producer:
     return Producer({"bootstrap.servers": bootstrap, "linger.ms": 100})
 
 
-def make_consumer(bootstrap: str, topic: str, group_id: str) -> Consumer:
+def make_consumer(bootstrap: str, topic: str, group_id: str, auto_commit: bool = True) -> Consumer:
     consumer = Consumer(
         {
             "bootstrap.servers": bootstrap,
             "group.id": group_id,
             "auto.offset.reset": "earliest",
-            "enable.auto.commit": True,
+            "enable.auto.commit": auto_commit,
         }
     )
     consumer.subscribe([topic])

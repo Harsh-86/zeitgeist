@@ -1,87 +1,236 @@
+import json
+
+import httpx
+
 from tests.unit.test_parser import make_row
+from zeitgeist.gdelt.client import export_url_for, stamp_from_url
 from zeitgeist.ingestor.main import DeliveryTracker, IngestorState, run_cycle
 
 
 class FakeGdeltClient:
-    def __init__(self, url, rows):
-        self.url = url
-        self.rows = rows
+    """Fake client keyed by 14-digit stamp. fetch_map values are either a list of
+    row strings, or the literal string "404" to simulate a not-yet-published window.
+    """
+
+    def __init__(self, latest_stamp, fetch_map):
+        self.latest_stamp = latest_stamp
+        self.fetch_map = fetch_map
+        self.fetched = []  # stamps actually fetched, in order
 
     def latest_export_url(self):
-        return self.url
+        if self.latest_stamp is None:
+            return None
+        return export_url_for(self.latest_stamp)
 
     def fetch_rows(self, url):
-        return iter(self.rows)
+        stamp = stamp_from_url(url)
+        self.fetched.append(stamp)
+        value = self.fetch_map[stamp]
+        if value == "404":
+            request = httpx.Request("GET", url)
+            response = httpx.Response(404, request=request)
+            raise httpx.HTTPStatusError("404", request=request, response=response)
+        return iter(value)
 
 
 def make_state(tmp_path):
     return IngestorState(tmp_path / "state.json")
 
 
-def test_run_cycle_publishes_parsed_events(tmp_path):
+# -- IngestorState -----------------------------------------------------------
+
+
+def test_state_persists_across_instances(tmp_path):
+    path = tmp_path / "state.json"
+    IngestorState(path).save("20260818144500")
+    assert IngestorState(path).last_stamp == "20260818144500"
+
+
+def test_state_migrates_old_last_url_format(tmp_path):
+    path = tmp_path / "state.json"
+    path.write_text(
+        json.dumps(
+            {"last_url": "https://data.gdeltproject.org/gdeltv2/20260818143000.export.CSV.zip"}
+        )
+    )
+    assert IngestorState(path).last_stamp == "20260818143000"
+
+
+def test_state_missing_file_has_no_last_stamp(tmp_path):
+    assert make_state(tmp_path).last_stamp is None
+
+
+# -- run_cycle: first run / no backfill --------------------------------------
+
+
+def test_run_cycle_first_run_publishes_only_latest_window(tmp_path):
+    client = FakeGdeltClient("20260818143000", {"20260818143000": [make_row(), "malformed\trow"]})
     sent = []
-    client = FakeGdeltClient("http://x/1.export.CSV.zip", [make_row(), "malformed\trow"])
     published, skipped = run_cycle(
         client, make_state(tmp_path), lambda t, k, v: sent.append((t, k))
     )
     assert published == 1
     assert skipped == 1
     assert sent == [("raw.events", "1234567890")]
-
-
-def test_run_cycle_skips_already_seen_url(tmp_path):
-    state = make_state(tmp_path)
-    state.save("http://x/1.export.CSV.zip")
-    client = FakeGdeltClient("http://x/1.export.CSV.zip", [make_row()])
-    assert run_cycle(client, state, lambda t, k, v: None) == (0, 0)
+    assert client.fetched == ["20260818143000"]
 
 
 def test_run_cycle_handles_no_url(tmp_path):
-    client = FakeGdeltClient(None, [])
+    client = FakeGdeltClient(None, {})
     assert run_cycle(client, make_state(tmp_path), lambda t, k, v: None) == (0, 0)
 
 
-def test_state_persists_across_instances(tmp_path):
-    path = tmp_path / "state.json"
-    IngestorState(path).save("http://x/2.export.CSV.zip")
-    assert IngestorState(path).last_url == "http://x/2.export.CSV.zip"
+def test_run_cycle_skips_when_state_already_at_latest(tmp_path):
+    state = make_state(tmp_path)
+    state.save("20260818143000")
+    client = FakeGdeltClient("20260818143000", {"20260818143000": [make_row()]})
+    assert run_cycle(client, state, lambda t, k, v: None) == (0, 0)
+    assert client.fetched == []
+
+
+# -- run_cycle: multi-window backfill -----------------------------------------
+
+
+def test_run_cycle_backfills_multiple_pending_windows_in_order(tmp_path):
+    state = make_state(tmp_path)
+    state.save("20260818140000")
+    stamps = ["20260818141500", "20260818143000", "20260818144500"]
+    fetch_map = {s: [make_row()] for s in stamps}
+    client = FakeGdeltClient(stamps[-1], fetch_map)
+    sent = []
+    published, skipped = run_cycle(
+        client, state, lambda t, k, v: sent.append((t, k))
+    )
+    assert client.fetched == stamps
+    assert published == 3
+    assert skipped == 0
+    assert state.last_stamp == stamps[-1]
+    assert len(sent) == 3
+
+
+# -- run_cycle: 404 on the newest (latest) window -----------------------------
+
+
+def test_run_cycle_latest_window_404_no_state_change_no_exception(tmp_path):
+    state = make_state(tmp_path)
+    client = FakeGdeltClient("20260818143000", {"20260818143000": "404"})
+    published, skipped = run_cycle(client, state, lambda t, k, v: None)
+    assert (published, skipped) == (0, 0)
+    assert state.last_stamp is None
+
+
+def test_run_cycle_latest_window_404_past_ten_attempts_still_no_exception(tmp_path):
+    state = make_state(tmp_path)
+    client = FakeGdeltClient("20260818143000", {"20260818143000": "404"})
+    misses = {"20260818143000": 10}
+    published, skipped = run_cycle(client, state, lambda t, k, v: None, misses=misses)
+    assert (published, skipped) == (0, 0)
+    assert misses["20260818143000"] == 11
+    assert state.last_stamp is None
+
+
+# -- run_cycle: 404 on a middle (older) window ---------------------------------
+
+
+def test_run_cycle_middle_window_404_stops_walk_before_five_attempts(tmp_path):
+    state = make_state(tmp_path)
+    state.save("20260818140000")
+    stamps = ["20260818141500", "20260818143000"]
+    fetch_map = {"20260818141500": "404", "20260818143000": [make_row()]}
+    client = FakeGdeltClient(stamps[-1], fetch_map)
+    misses: dict[str, int] = {}
+    published, skipped = run_cycle(client, state, lambda t, k, v: None, misses=misses)
+    assert (published, skipped) == (0, 0)
+    assert client.fetched == ["20260818141500"]  # newer window NOT fetched
+    assert state.last_stamp == "20260818140000"  # unchanged
+    assert misses["20260818141500"] == 1
+
+
+def test_run_cycle_middle_window_404_skipped_after_five_attempts_continues(tmp_path):
+    state = make_state(tmp_path)
+    state.save("20260818140000")
+    stamps = ["20260818141500", "20260818143000"]
+    fetch_map = {"20260818141500": "404", "20260818143000": [make_row()]}
+    client = FakeGdeltClient(stamps[-1], fetch_map)
+    misses = {"20260818141500": 4}  # this attempt makes it the 5th
+    sent = []
+    published, skipped = run_cycle(
+        client, state, lambda t, k, v: sent.append((t, k)), misses=misses
+    )
+    assert client.fetched == ["20260818141500", "20260818143000"]
+    assert state.last_stamp == "20260818143000"
+    assert "20260818141500" not in misses
+    assert published == 1
+    assert skipped == 0
+
+
+# -- run_cycle: undelivered flush mid-backfill ---------------------------------
+
+
+def test_run_cycle_flush_undelivered_mid_backfill_stops_walk(tmp_path):
+    state = make_state(tmp_path)
+    state.save("20260818140000")
+    stamps = ["20260818141500", "20260818143000"]
+    fetch_map = {s: [make_row()] for s in stamps}
+    client = FakeGdeltClient(stamps[-1], fetch_map)
+    published, skipped = run_cycle(client, state, lambda t, k, v: None, flush=lambda: 3)
+    assert client.fetched == ["20260818141500"]  # stopped after first window
+    assert state.last_stamp == "20260818140000"  # unchanged
+    assert published == 1  # message was sent even though undelivered
+    assert skipped == 0
 
 
 def test_run_cycle_does_not_save_state_on_undelivered_messages(tmp_path):
     """When flush returns > 0, state is NOT saved and cycle is retried."""
     state = make_state(tmp_path)
-    client = FakeGdeltClient("http://x/1.export.CSV.zip", [make_row()])
-    published, skipped = run_cycle(
-        client, state, lambda t, k, v: None, flush=lambda: 5
-    )
+    client = FakeGdeltClient("20260818143000", {"20260818143000": [make_row()]})
+    published, skipped = run_cycle(client, state, lambda t, k, v: None, flush=lambda: 5)
     assert published == 1
     assert skipped == 0
-    # State should NOT be saved when messages are undelivered
-    assert state.last_url is None
+    assert state.last_stamp is None
 
 
 def test_run_cycle_saves_state_when_all_messages_delivered(tmp_path):
     """When flush returns 0, state IS saved normally."""
     state = make_state(tmp_path)
-    client = FakeGdeltClient("http://x/1.export.CSV.zip", [make_row()])
-    published, skipped = run_cycle(
-        client, state, lambda t, k, v: None, flush=lambda: 0
-    )
+    client = FakeGdeltClient("20260818143000", {"20260818143000": [make_row()]})
+    published, skipped = run_cycle(client, state, lambda t, k, v: None, flush=lambda: 0)
     assert published == 1
     assert skipped == 0
-    # State should be saved when all messages are delivered
-    assert state.last_url == "http://x/1.export.CSV.zip"
+    assert state.last_stamp == "20260818143000"
 
 
 def test_run_cycle_without_flush_still_saves_state(tmp_path):
     """Existing behavior preserved: when flush is None, state is saved."""
     state = make_state(tmp_path)
-    client = FakeGdeltClient("http://x/1.export.CSV.zip", [make_row()])
+    client = FakeGdeltClient("20260818143000", {"20260818143000": [make_row()]})
     published, skipped = run_cycle(client, state, lambda t, k, v: None)
     assert published == 1
     assert skipped == 0
-    # State should be saved when flush is not provided
-    assert state.last_url == "http://x/1.export.CSV.zip"
+    assert state.last_stamp == "20260818143000"
+
+
+def test_run_cycle_blocks_state_advance_when_hard_failures_counted_via_flush(tmp_path):
+    """Simulates main()'s flush() wiring: producer.flush() returns 0 remaining in the
+    queue (message was dequeued via the error callback) but the tracked failure count
+    is added in, so run_cycle still sees undelivered > 0 and does not advance state.
+    """
+    state = make_state(tmp_path)
+    client = FakeGdeltClient("20260818143000", {"20260818143000": [make_row()]})
+    tracker = DeliveryTracker()
+    tracker.on_delivery(Exception("hard failure"), "msg-bad")
+
+    def flush() -> int:
+        producer_flush_remaining = 0  # e.g. producer.flush(30) returning 0
+        return producer_flush_remaining + tracker.failed
+
+    published, skipped = run_cycle(client, state, lambda t, k, v: None, flush=flush)
+    assert published == 1
+    assert skipped == 0
+    assert state.last_stamp is None
+
+
+# -- DeliveryTracker -----------------------------------------------------------
 
 
 def test_delivery_tracker_counts_failed_deliveries():
@@ -101,23 +250,3 @@ def test_delivery_tracker_reset_clears_failed_count():
     assert tracker.failed == 1
     tracker.reset()
     assert tracker.failed == 0
-
-
-def test_run_cycle_blocks_state_advance_when_hard_failures_counted_via_flush(tmp_path):
-    """Simulates main()'s flush() wiring: producer.flush() returns 0 remaining in the
-    queue (message was dequeued via the error callback) but the tracked failure count
-    is added in, so run_cycle still sees undelivered > 0 and does not advance state.
-    """
-    state = make_state(tmp_path)
-    client = FakeGdeltClient("http://x/1.export.CSV.zip", [make_row()])
-    tracker = DeliveryTracker()
-    tracker.on_delivery(Exception("hard failure"), "msg-bad")
-
-    def flush() -> int:
-        producer_flush_remaining = 0  # e.g. producer.flush(30) returning 0
-        return producer_flush_remaining + tracker.failed
-
-    published, skipped = run_cycle(client, state, lambda t, k, v: None, flush=flush)
-    assert published == 1
-    assert skipped == 0
-    assert state.last_url is None
