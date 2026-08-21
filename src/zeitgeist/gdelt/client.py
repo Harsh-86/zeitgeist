@@ -6,7 +6,7 @@ from collections.abc import Iterator
 
 import httpx
 
-LASTUPDATE_URL = "http://data.gdeltproject.org/gdeltv2/lastupdate.txt"
+LASTUPDATE_URL = "https://data.gdeltproject.org/gdeltv2/lastupdate.txt"
 
 
 class GdeltClient:
