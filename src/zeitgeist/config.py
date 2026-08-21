@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 RAW_TOPIC = "raw.events"
 CLAIMS_TOPIC = "extracted.claims"
+LLM_TOPIC = "llm.queue"
 
 
 @dataclass(frozen=True)
