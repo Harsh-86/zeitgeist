@@ -87,7 +87,7 @@ def run_cycle(
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     settings = Settings.from_env()
-    client = GdeltClient(httpx.Client())
+    client = GdeltClient(httpx.Client(follow_redirects=True))
     state = IngestorState(Path(settings.state_path))
     producer = make_producer(settings.kafka_bootstrap)
     tracker = DeliveryTracker()
