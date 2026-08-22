@@ -51,3 +51,15 @@ def test_llm_env_overrides(monkeypatch):
     settings = Settings.from_env()
     assert settings.anthropic_api_key == "sk-ant-test"
     assert settings.llm_model == "claude-opus-5"
+
+
+def test_llm_budget_state_path_default(monkeypatch):
+    monkeypatch.delenv("LLM_BUDGET_STATE_PATH", raising=False)
+    settings = Settings.from_env()
+    assert settings.llm_budget_state_path == "state/llm_budget.json"
+
+
+def test_llm_budget_state_path_env_override(monkeypatch):
+    monkeypatch.setenv("LLM_BUDGET_STATE_PATH", "state/custom_llm_budget.json")
+    settings = Settings.from_env()
+    assert settings.llm_budget_state_path == "state/custom_llm_budget.json"

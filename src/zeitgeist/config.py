@@ -19,6 +19,7 @@ class Settings:
     sampler_min_score: float
     llm_max_calls_per_day: int
     sampler_budget_state_path: str
+    llm_budget_state_path: str
     anthropic_api_key: str
     llm_model: str
 
@@ -35,6 +36,9 @@ class Settings:
             llm_max_calls_per_day=int(os.getenv("LLM_MAX_CALLS_PER_DAY", "400")),
             sampler_budget_state_path=os.getenv(
                 "SAMPLER_BUDGET_STATE_PATH", "state/sampler_budget.json"
+            ),
+            llm_budget_state_path=os.getenv(
+                "LLM_BUDGET_STATE_PATH", "state/llm_budget.json"
             ),
             anthropic_api_key=os.getenv("ANTHROPIC_API_KEY", ""),
             llm_model=os.getenv("LLM_MODEL", "claude-haiku-4-5"),
