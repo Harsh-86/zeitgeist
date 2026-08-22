@@ -43,6 +43,32 @@ volumes persist across deploys.
 - `curl http://<ip>:8000/stats` → entity/event counts (should grow every ~15 min)
 - `ssh root@<ip> 'cd zeitgeist && docker compose -f docker/docker-compose.yml logs --tail 50 ingestor'`
 
+## LLM tier
+
+The `llm-extractor` service enriches a sampled subset of events with Claude
+(Haiku by default) instead of the rules-only extractor. It needs an Anthropic
+API key.
+
+- **Env file**: create `docker/.env` (copy `docker/.env.example`) with:
+  ```
+  ANTHROPIC_API_KEY=sk-ant-...
+  LLM_MAX_CALLS_PER_DAY=400
+  ```
+  `docker/.env` is gitignored and auto-loaded by `docker compose -f
+  docker/docker-compose.yml` for `${...}` interpolation (the compose file's
+  directory is the project directory). Never commit it.
+- **Spend-limit advice**: set a monthly spend limit on the API key/workspace
+  at console.anthropic.com *in addition to* `LLM_MAX_CALLS_PER_DAY` — the app-level
+  cap is defense in depth, not a substitute for the platform-enforced limit.
+- **Two daily caps**: the `sampler` service admits at most
+  `SAMPLER_MIN_SCORE`-qualifying events into `llm.queue` per day (its own
+  budget file, `sampler_budget.json`), and `llm-extractor` independently caps
+  itself at `LLM_MAX_CALLS_PER_DAY` calls/day (`llm_budget.json`). Both reset
+  at UTC midnight and persist across restarts via their `*-state` volumes.
+- **Verify it's live**: `docker compose -f docker/docker-compose.yml logs -f
+  llm-extractor` should show `llm call: in=... out=... cached=...` lines, and
+  `MATCH (ev:Event {tier:'llm'}) RETURN count(ev)` in cypher-shell should grow.
+
 ## Known failure modes
 
 - **GDELT missed window / download error**: ingestor logs the failure and retries next
