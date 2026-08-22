@@ -51,5 +51,6 @@ def event_to_claims(event: GdeltEvent) -> list[Claim]:
             geo_lon=event.geo_lon,
             source_url=event.source_url,
             confidence=min(1.0, event.num_mentions / 10),
+            tier="rules",
         )
     ]

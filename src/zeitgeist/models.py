@@ -54,10 +54,14 @@ class Claim:
     geo_lon: float | None
     source_url: str | None
     confidence: float
+    tier: str = "rules"
+    detail: str | None = None
 
     def to_json(self) -> bytes:
         return json.dumps(asdict(self)).encode()
 
     @classmethod
     def from_json(cls, raw: bytes) -> "Claim":
-        return cls(**json.loads(raw))
+        data = json.loads(raw)
+        defaults = {"tier": "rules", "detail": None}
+        return cls(**{**defaults, **data})
