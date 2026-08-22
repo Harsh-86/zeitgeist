@@ -19,6 +19,8 @@ class Settings:
     sampler_min_score: float
     llm_max_calls_per_day: int
     sampler_budget_state_path: str
+    anthropic_api_key: str
+    llm_model: str
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -34,4 +36,6 @@ class Settings:
             sampler_budget_state_path=os.getenv(
                 "SAMPLER_BUDGET_STATE_PATH", "state/sampler_budget.json"
             ),
+            anthropic_api_key=os.getenv("ANTHROPIC_API_KEY", ""),
+            llm_model=os.getenv("LLM_MODEL", "claude-haiku-4-5"),
         )

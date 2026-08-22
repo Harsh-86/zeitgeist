@@ -35,3 +35,19 @@ def test_sampler_env_overrides(monkeypatch):
     assert settings.sampler_min_score == 0.8
     assert settings.llm_max_calls_per_day == 50
     assert settings.sampler_budget_state_path == "state/custom_budget.json"
+
+
+def test_llm_defaults(monkeypatch):
+    for var in ("ANTHROPIC_API_KEY", "LLM_MODEL"):
+        monkeypatch.delenv(var, raising=False)
+    settings = Settings.from_env()
+    assert settings.anthropic_api_key == ""
+    assert settings.llm_model == "claude-haiku-4-5"
+
+
+def test_llm_env_overrides(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    monkeypatch.setenv("LLM_MODEL", "claude-opus-5")
+    settings = Settings.from_env()
+    assert settings.anthropic_api_key == "sk-ant-test"
+    assert settings.llm_model == "claude-opus-5"
