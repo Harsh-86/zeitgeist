@@ -45,7 +45,11 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     settings = Settings.from_env()
     consumer = make_consumer(
-        settings.kafka_bootstrap, RAW_TOPIC, group_id="sampler", auto_commit=False
+        settings.kafka_bootstrap,
+        RAW_TOPIC,
+        group_id="sampler",
+        auto_commit=False,
+        offset_reset="latest",
     )
     producer = make_producer(settings.kafka_bootstrap)
     batcher = Batcher(producer, consumer)
