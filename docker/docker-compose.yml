@@ -100,6 +100,8 @@ services:
     environment:
       <<: *service-env
       SAMPLER_BUDGET_STATE_PATH: /state/sampler_budget.json
+      SAMPLER_MIN_SCORE: ${SAMPLER_MIN_SCORE:-1.2}
+      LLM_MAX_CALLS_PER_DAY: ${LLM_MAX_CALLS_PER_DAY:-400}
     volumes:
       - sampler-state:/state
     depends_on:
@@ -127,6 +129,8 @@ services:
       <<: *service-env
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       LLM_BUDGET_STATE_PATH: /state/llm_budget.json
+      LLM_MAX_CALLS_PER_DAY: ${LLM_MAX_CALLS_PER_DAY:-400}
+      LLM_MODEL: ${LLM_MODEL:-claude-haiku-4-5}
     volumes:
       - llm-state:/state
     depends_on:

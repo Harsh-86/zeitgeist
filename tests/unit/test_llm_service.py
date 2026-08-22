@@ -241,14 +241,16 @@ class FakeMessage:
 
 
 class RecordingProducer:
-    def __init__(self, order):
+    def __init__(self, order, flush_return=0):
         self._order = order
+        self._flush_return = flush_return
 
     def produce(self, topic, key=None, value=None):
         self._order.append(("produce", topic, key, value))
 
     def flush(self, timeout=None):
         self._order.append(("flush",))
+        return self._flush_return
 
 
 class RecordingConsumer:
@@ -282,6 +284,33 @@ def test_process_one_produces_then_flushes_then_commits_in_order():
     assert produce_calls[0][2] == b"k"
     flush_index = order.index(("flush",))
     assert all(order.index(call) < flush_index for call in produce_calls)
+
+
+def test_process_one_does_not_commit_when_flush_reports_undelivered(caplog):
+    event = make_event()
+    order = []
+    producer = RecordingProducer(order, flush_return=3)
+    consumer = RecordingConsumer(order)
+    message = FakeMessage(value=event.to_json(), key=b"k", error=None)
+    extractor = FakeExtractor(llm_claims=ONE_CLAIM, usage=USAGE)
+    dispositions = {}
+
+    with caplog.at_level("ERROR"):
+        disposition = process_one(
+            ok_html_client(),
+            extractor,
+            AlwaysUnderBudget(),
+            producer,
+            consumer,
+            message,
+            dispositions,
+        )
+
+    assert disposition is None
+    assert dispositions == {}
+    assert order[-1] == ("flush",)
+    assert not any(entry[0] == "commit" for entry in order)
+    assert any("3" in r.message for r in caplog.records)
 
 
 def test_process_one_skips_and_does_not_commit_on_consumer_error():

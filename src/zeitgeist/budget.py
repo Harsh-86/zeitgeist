@@ -2,6 +2,8 @@
 
 import json
 import logging
+import os
+import tempfile
 from collections.abc import Callable
 from datetime import date
 from pathlib import Path
@@ -34,12 +36,35 @@ class DailyBudget:
     def _load(self) -> tuple[str | None, int]:
         if not self._path.exists():
             return None, 0
-        data = json.loads(self._path.read_text())
+        try:
+            data = json.loads(self._path.read_text())
+        except (json.JSONDecodeError, OSError, ValueError):
+            logger.exception(
+                "budget state file unreadable/corrupt, treating as fresh (path=%s)",
+                self._path,
+            )
+            return None, 0
         return data.get("date"), data.get("count", 0)
 
     def _save(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._path.write_text(json.dumps({"date": self._date, "count": self._count}))
+        payload = json.dumps({"date": self._date, "count": self._count})
+
+        fd, tmp_name = tempfile.mkstemp(
+            dir=self._path.parent, prefix=f".{self._path.name}.", suffix=".tmp"
+        )
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(payload)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_name, self._path)
+        except BaseException:
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+            raise
 
     def try_spend(self) -> bool:
         """Increment and return True while under today's limit; False once exhausted."""

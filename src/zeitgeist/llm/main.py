@@ -93,7 +93,14 @@ def process_one(
         producer.produce(CLAIMS_TOPIC, key=message.key(), value=payload)
 
     disposition = process_event(message.value(), http, extractor, budget, produce)
-    producer.flush(10)
+    undelivered = producer.flush(10)
+    if undelivered > 0:
+        logger.error(
+            "producer flush left %d message(s) undelivered; skipping commit "
+            "so this message redelivers (downstream is idempotent)",
+            undelivered,
+        )
+        return None
     consumer.commit(message=message, asynchronous=False)
     dispositions[disposition] = dispositions.get(disposition, 0) + 1
     return disposition

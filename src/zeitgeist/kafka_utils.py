@@ -1,6 +1,10 @@
 """Thin confluent-kafka factories. Real broker behavior is covered by integration tests."""
 
+import logging
+
 from confluent_kafka import Consumer, Producer
+
+logger = logging.getLogger("zeitgeist.kafka_utils")
 
 
 def make_producer(bootstrap: str) -> Producer:
@@ -50,6 +54,13 @@ class Batcher:
             self.commit()
 
     def commit(self) -> None:
-        self._producer.flush(10)
+        undelivered = self._producer.flush(10)
+        if undelivered > 0:
+            logger.error(
+                "producer flush left %d message(s) undelivered; skipping commit "
+                "so pending offsets retry at the next commit point",
+                undelivered,
+            )
+            return
         self._consumer.commit(asynchronous=False)
         self.pending = 0

@@ -2,12 +2,13 @@ from zeitgeist.kafka_utils import Batcher
 
 
 class RecordingProducer:
-    def __init__(self, calls):
+    def __init__(self, calls, flush_return=0):
         self.calls = calls
+        self._flush_return = flush_return
 
     def flush(self, timeout=None):
         self.calls.append(("flush", timeout))
-        return 0
+        return self._flush_return
 
 
 class RecordingConsumer:
@@ -50,3 +51,19 @@ def test_batcher_idle_commit_is_noop_when_nothing_pending():
     batcher = Batcher(RecordingProducer(calls), RecordingConsumer(calls))
     batcher.maybe_commit_idle()
     assert calls == []
+
+
+def test_batcher_commit_skips_commit_when_flush_reports_undelivered(caplog):
+    calls = []
+    producer = RecordingProducer(calls, flush_return=3)
+    consumer = RecordingConsumer(calls)
+    batcher = Batcher(producer, consumer, threshold=1)
+
+    with caplog.at_level("ERROR"):
+        batcher.record()
+
+    assert calls == [("flush", 10)]
+    assert not any(c[0] == "commit" for c in calls)
+    assert any("3" in r.message for r in caplog.records)
+    # pending is kept so a later commit point retries.
+    assert batcher.pending == 1
