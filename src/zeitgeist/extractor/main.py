@@ -4,7 +4,7 @@ import logging
 
 from zeitgeist.config import CLAIMS_TOPIC, RAW_TOPIC, Settings
 from zeitgeist.extractor.rules import event_to_claims
-from zeitgeist.kafka_utils import make_consumer, make_producer
+from zeitgeist.kafka_utils import Batcher, make_consumer, make_producer
 from zeitgeist.models import GdeltEvent
 
 logger = logging.getLogger("zeitgeist.extractor")
@@ -17,34 +17,6 @@ def process_message(raw: bytes) -> list[bytes]:
         logger.warning("undecodable message skipped")
         return []
     return [claim.to_json() for claim in event_to_claims(event)]
-
-
-class Batcher:
-    """Commits consumer offsets only after the producer has flushed pending claims.
-
-    Offsets must never be committed for messages whose claims haven't actually made
-    it to Kafka, so every commit point flushes the producer first.
-    """
-
-    def __init__(self, producer, consumer, threshold: int = 100) -> None:
-        self._producer = producer
-        self._consumer = consumer
-        self._threshold = threshold
-        self.pending = 0
-
-    def record(self) -> None:
-        self.pending += 1
-        if self.pending >= self._threshold:
-            self.commit()
-
-    def maybe_commit_idle(self) -> None:
-        if self.pending > 0:
-            self.commit()
-
-    def commit(self) -> None:
-        self._producer.flush(10)
-        self._consumer.commit(asynchronous=False)
-        self.pending = 0
 
 
 def main() -> None:

@@ -27,7 +27,9 @@ ON CREATE SET
   ev.lat = $geo_lat,
   ev.lon = $geo_lon,
   ev.source_url = $source_url,
-  ev.confidence = $confidence
+  ev.confidence = $confidence,
+  ev.tier = $tier,
+  ev.detail = $detail
 MERGE (s:Entity {name: $subject})
 MERGE (s)-[:ACTOR1_IN]->(ev)
 FOREACH (_ IN CASE WHEN $object IS NULL THEN [] ELSE [1] END |

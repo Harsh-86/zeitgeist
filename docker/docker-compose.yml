@@ -34,7 +34,8 @@ services:
     command:
       - >
         /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic raw.events --partitions 6 --replication-factor 1 &&
-        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic extracted.claims --partitions 6 --replication-factor 1
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic extracted.claims --partitions 6 --replication-factor 1 &&
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic llm.queue --partitions 6 --replication-factor 1
 
   neo4j:
     image: neo4j:5-community
@@ -93,6 +94,21 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  sampler:
+    build: { context: .., dockerfile: docker/Dockerfile }
+    command: ["python", "-m", "zeitgeist.sampler.main"]
+    environment:
+      <<: *service-env
+      SAMPLER_BUDGET_STATE_PATH: /state/sampler_budget.json
+      SAMPLER_MIN_SCORE: ${SAMPLER_MIN_SCORE:-1.2}
+      LLM_MAX_CALLS_PER_DAY: ${LLM_MAX_CALLS_PER_DAY:-400}
+    volumes:
+      - sampler-state:/state
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
   api:
     build: { context: .., dockerfile: docker/Dockerfile }
     command: ["python", "-m", "zeitgeist.api.main"]
@@ -106,7 +122,25 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  llm-extractor:
+    build: { context: .., dockerfile: docker/Dockerfile }
+    command: ["python", "-m", "zeitgeist.llm.main"]
+    environment:
+      <<: *service-env
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      LLM_BUDGET_STATE_PATH: /state/llm_budget.json
+      LLM_MAX_CALLS_PER_DAY: ${LLM_MAX_CALLS_PER_DAY:-400}
+      LLM_MODEL: ${LLM_MODEL:-claude-haiku-4-5}
+    volumes:
+      - llm-state:/state
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
 volumes:
   kafka-data:
   neo4j-data:
   ingestor-state:
+  sampler-state:
+  llm-state:
