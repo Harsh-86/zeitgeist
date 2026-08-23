@@ -1,4 +1,5 @@
 import json
+from datetime import UTC, datetime
 
 import httpx
 import pytest
@@ -337,6 +338,27 @@ def test_run_cycle_does_not_increment_windows_total_when_no_state_change(tmp_pat
     before_windows = ingestor_main.WINDOWS_TOTAL._value.get()
     run_cycle(client, state, lambda t, k, v: None)
     assert ingestor_main.WINDOWS_TOTAL._value.get() == before_windows
+
+
+# -- freshness gauge startup seeding -------------------------------------------
+
+
+def test_init_freshness_from_state_sets_gauge_to_stamp_epoch(tmp_path):
+    """Gauges are in-memory and reset to 0 on restart. Seed from the last saved stamp
+    so the freshness alert doesn't fire spuriously right after every deploy.
+    """
+    state = make_state(tmp_path)
+    state.save("20260818143000")
+    ingestor_main._init_freshness_from_state(state)
+    expected = datetime(2026, 8, 18, 14, 30, 0, tzinfo=UTC).timestamp()
+    assert ingestor_main.LAST_SUCCESS_TIMESTAMP._value.get() == expected
+
+
+def test_init_freshness_from_state_leaves_gauge_untouched_when_no_state(tmp_path):
+    state = make_state(tmp_path)
+    before = ingestor_main.LAST_SUCCESS_TIMESTAMP._value.get()
+    ingestor_main._init_freshness_from_state(state)
+    assert ingestor_main.LAST_SUCCESS_TIMESTAMP._value.get() == before
 
 
 # -- main(): metrics server wiring ---------------------------------------------

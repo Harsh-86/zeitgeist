@@ -4,6 +4,7 @@ import json
 import logging
 import time
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx
@@ -98,6 +99,24 @@ class IngestorState:
     def save(self, stamp: str) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._path.write_text(json.dumps({"last_stamp": stamp}))
+
+
+def _init_freshness_from_state(state: IngestorState) -> None:
+    """Seed the freshness gauge from persisted state on startup.
+
+    Gauges live in memory and reset to 0 on every process restart, which would make
+    the "no successful window in N minutes" alert fire spuriously right after every
+    deploy — until the next GDELT window lands. Seeding from the last saved stamp
+    avoids that false alarm. Caveat: the stamp is the WINDOW's nominal time, not the
+    wall-clock moment it was actually processed — close enough for a 45-minute alert
+    threshold, and strictly better than leaving the gauge at 0.
+    """
+    stamp = state.last_stamp
+    if stamp is None:
+        return
+    # GDELT stamps are naive UTC timestamps with no timezone component to parse.
+    stamp_dt = datetime.strptime(stamp, "%Y%m%d%H%M%S").replace(tzinfo=UTC)
+    LAST_SUCCESS_TIMESTAMP.set(stamp_dt.timestamp())
 
 
 def run_cycle(
@@ -205,6 +224,7 @@ def main() -> None:
         start_metrics_server(settings.metrics_port)
     client = GdeltClient(httpx.Client(follow_redirects=True))
     state = IngestorState(Path(settings.state_path))
+    _init_freshness_from_state(state)
     producer = make_producer(settings.kafka_bootstrap)
     tracker = DeliveryTracker()
     misses: dict[str, int] = {}
