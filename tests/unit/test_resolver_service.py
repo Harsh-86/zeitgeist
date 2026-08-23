@@ -209,6 +209,12 @@ def test_pair_judging_records_judgment_and_writes_alias_when_same_and_confident(
     session = FakeSession(
         canned={
             resolver_graph.FETCH_ENTITIES_CYPHER: ECB_PAIR_ENTITIES,
+            resolver_graph.RESOLVE_CANONICAL_CYPHER: [
+                FakeResult([{"resolved": "EUROPEAN CENTRAL BANK"}])
+            ],
+            resolver_graph.CHECK_EXISTING_ALIAS_CYPHER: [
+                FakeResult([{"has_outgoing": False, "has_incoming": False}])
+            ],
         }
     )
     judge = FakeJudge(
@@ -301,6 +307,36 @@ def test_judgment_direction_uses_candidate_pairs_order_verbatim():
     )
     assert record_params["a"] == "ECB"
     assert record_params["b"] == "EUROPEAN CENTRAL BANK"
+
+
+def test_pair_judging_same_verdict_above_threshold_but_alias_guard_hit_leaves_aliased_at_zero():
+    """I1 fix: write_alias's own guard (e.g. the alias already having an
+    outgoing ALIAS_OF edge) can refuse the write even when the verdict is
+    SAME and confident. The `aliased` counter must reflect the actual write,
+    not just that a SAME/confident verdict was judged."""
+    session = FakeSession(
+        canned={
+            resolver_graph.FETCH_ENTITIES_CYPHER: ECB_PAIR_ENTITIES,
+            resolver_graph.RESOLVE_CANONICAL_CYPHER: [
+                FakeResult([{"resolved": "EUROPEAN CENTRAL BANK"}])
+            ],
+            resolver_graph.CHECK_EXISTING_ALIAS_CYPHER: [
+                FakeResult([{"has_outgoing": True, "has_incoming": False}])
+            ],
+        }
+    )
+    judge = FakeJudge(
+        pair_verdicts={
+            ("ECB", "EUROPEAN CENTRAL BANK"): (PairVerdict(verdict="SAME", confidence=0.9), {})
+        }
+    )
+    budget = AlwaysAvailable()
+
+    counters = run_cycle(session, judge, budget, make_cfg(er_min_confidence=0.8))
+
+    assert counters == {**EMPTY_COUNTERS, "judged": 1, "aliased": 0}
+    write_calls = [q for q in session.queries if q[0] == resolver_graph.WRITE_ALIAS_CYPHER]
+    assert write_calls == []
 
 
 # ---- budget stops the cycle ----------------------------------------------
@@ -405,6 +441,12 @@ def test_counters_accurate_across_screening_and_pairing():
             ],
             resolver_graph.FETCH_JUDGED_PAIRS_CYPHER: [
                 FakeResult([{"a": "IMF", "b": "INTERNATIONAL MONETARY FUND"}])
+            ],
+            resolver_graph.RESOLVE_CANONICAL_CYPHER: [
+                FakeResult([{"resolved": "EUROPEAN CENTRAL BANK"}])
+            ],
+            resolver_graph.CHECK_EXISTING_ALIAS_CYPHER: [
+                FakeResult([{"has_outgoing": False, "has_incoming": False}])
             ],
         }
     )

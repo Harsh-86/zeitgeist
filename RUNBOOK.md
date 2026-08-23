@@ -130,6 +130,13 @@ being healthy (it never touches Kafka).
   RETURN coalesce(c, e) AS canonical
   ```
   (single-hop is guaranteed — `ALIAS_OF` edges never chain).
+- **Verifying no alias chains exist**: `write_alias` enforces single-hop by
+  construction (a bidirectional guard refuses the write if either end
+  already has an `ALIAS_OF` edge), but it's cheap to audit directly:
+  ```cypher
+  MATCH (a)-[:ALIAS_OF]->(b)-[:ALIAS_OF]->(c) RETURN a.name, b.name, c.name
+  ```
+  Expect zero rows, always.
 - **Reversibility — undo a bad alias**: every write this service makes is a
   single edge or a few properties, so any mistake is a one-line Cypher fix
   in `cypher-shell` (no restart needed):

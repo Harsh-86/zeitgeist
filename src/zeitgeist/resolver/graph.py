@@ -9,8 +9,7 @@ Binding invariants (see the Phase 2b plan's Global Constraints):
   - record_judgment uses ON CREATE SET only — a judgment, once written, is
     immutable.
   - write_alias enforces single-hop, single-parent (first judgment wins), and
-    no-self-loop invariants (see its docstring for the exact approach and its
-    accepted limitation).
+    no-self-loop invariants (see its docstring for the exact approach).
 """
 
 import logging
@@ -85,8 +84,9 @@ RETURN coalesce(cc.name, c.name) AS resolved
 
 CHECK_EXISTING_ALIAS_CYPHER = """
 MATCH (alias:Entity {name: $alias_name})
-OPTIONAL MATCH (alias)-[:ALIAS_OF]->(existing)
-RETURN existing IS NOT NULL AS has_alias
+OPTIONAL MATCH (alias)-[:ALIAS_OF]->(outgoing)
+OPTIONAL MATCH (alias)<-[:ALIAS_OF]-(incoming)
+RETURN outgoing IS NOT NULL AS has_outgoing, incoming IS NOT NULL AS has_incoming
 """
 
 WRITE_ALIAS_CYPHER = """
@@ -172,10 +172,17 @@ def record_judgment(session, a: str, b: str, verdict: str, confidence: float) ->
     )
 
 
-def write_alias(session, alias_name: str, canonical_name: str) -> None:
+def write_alias(session, alias_name: str, canonical_name: str) -> bool:
     """Write an ALIAS_OF edge from alias_name to canonical_name, enforcing
     three invariants: single-hop, single-parent (first judgment wins), and
     no self-loops.
+
+    Returns True only when the ALIAS_OF edge write was actually attempted
+    (every guard passed and the MERGE ran); False whenever a guard
+    short-circuited the call or canonical_name didn't resolve to an existing
+    Entity node. Callers (e.g. the resolver's `aliased` counter) should treat
+    the return value, not "a SAME verdict was judged", as the source of
+    truth for whether an edge was written.
 
     Approach:
       1. Resolve canonical_name's own canonical. If the node named
@@ -185,40 +192,42 @@ def write_alias(session, alias_name: str, canonical_name: str) -> None:
          canonical_name has no such edge, resolution is canonical_name
          itself. If no Entity node named canonical_name exists at all, the
          resolve query returns no row; this is logged at WARNING (the
-         judgment referenced a name that isn't in the graph) and resolution
-         falls back to canonical_name, which then simply fails to MATCH in
-         step 3 below — a cheap, safe no-op.
+         judgment referenced a name that isn't in the graph) and the call
+         returns False immediately, without running either guard or the
+         write.
       2. No-self-loop guard: if the resolved name equals alias_name (the
          judgment would alias a node to itself, e.g. after resolution
-         collapses through an existing edge), log INFO and return without
-         writing anything.
-      3. Single-parent guard ("first judgment wins"): if alias_name already
-         has ANY outgoing ALIAS_OF edge, log INFO and return without writing
-         anything — the first judgment that aliased this node stands, and is
-         never overwritten. This is a pre-check-then-skip, which is race-free
-         for this resolver's single-threaded, single-writer usage.
-      4. Only if both guards pass: MERGE the ALIAS_OF edge from alias_name to
-         the resolved name. Both alias_name and the resolved name are
-         MATCHed, never MERGEd as nodes — write_alias never creates an
-         Entity node (both are expected to already exist from Phase 1
-         ingestion).
+         collapses through an existing edge), log INFO and return False
+         without writing anything.
+      3. Single-parent guard ("first judgment wins"), checked in BOTH
+         directions on alias_name so the guard can't be bypassed by a chain
+         forming from either end:
+           - Outgoing: alias_name already has an outgoing ALIAS_OF edge — the
+             first judgment that aliased it stands. Log INFO and return
+             False.
+           - Incoming: alias_name already has an incoming ALIAS_OF edge, i.e.
+             some other node already treats alias_name as its canonical.
+             Writing an outgoing edge from alias_name here would form a
+             two-hop chain (other -> alias_name -> resolved_name), breaking
+             the single-hop guarantee. Log INFO "node is canonical for
+             others; first judgment wins" and return False.
+         Both directions are a pre-check-then-skip, which is race-free for
+         this resolver's single-threaded, single-writer usage.
+      4. Only if every guard passes: MERGE the ALIAS_OF edge from alias_name
+         to the resolved name and return True. Both alias_name and the
+         resolved name are MATCHed, never MERGEd as nodes — write_alias never
+         creates an Entity node (both are expected to already exist from
+         Phase 1 ingestion).
 
-    Together, single-hop + single-parent-first-wins mean every Entity has at
-    most one outgoing ALIAS_OF edge and that edge always points at a node
-    with zero outgoing ALIAS_OF edges of its own. CANONICAL_PATTERN's reader
-    idiom (one OPTIONAL MATCH hop, coalesce to self) can therefore rely on at
-    most one ALIAS_OF hop ever needing to be followed.
-
-    Accepted limitation: this only prevents chains/re-parenting from *this*
-    write. It does not retroactively re-point edges that already point at
-    alias_name (existing incoming ALIAS_OF edges are left as-is) if some
-    other node was already aliased to alias_name before alias_name itself
-    became an alias — that would require rewriting an existing edge, which
-    the additions-only invariant forbids. In normal operation this is
-    unreachable: fetch_entities excludes already-aliased entities from the
-    pairing step, so an entity is only ever offered as a pairing candidate
-    (and thus a `canonical_name`/aliasing target) while it has no outgoing
-    ALIAS_OF edge of its own to later invalidate.
+    Together, single-hop + the bidirectional single-parent guard mean every
+    Entity has at most one outgoing ALIAS_OF edge, that edge always points at
+    a node with zero outgoing ALIAS_OF edges of its own, and a node that is
+    already canonical for someone else (has an incoming ALIAS_OF edge) can
+    never itself gain an outgoing one. Single-hop is therefore guaranteed by
+    construction at write time — not merely an operational assumption about
+    how callers happen to use this function — so CANONICAL_PATTERN's reader
+    idiom (one OPTIONAL MATCH hop, coalesce to self) can rely on at most one
+    ALIAS_OF hop ever needing to be followed.
     """
     resolve_result = session.run(RESOLVE_CANONICAL_CYPHER, canonical_name=canonical_name)
     resolve_record = resolve_result.single()
@@ -226,18 +235,24 @@ def write_alias(session, alias_name: str, canonical_name: str) -> None:
         logger.warning(
             "write_alias: canonical_name %r matches no Entity node; skipping", canonical_name
         )
-        resolved_name = canonical_name
-    else:
-        resolved_name = resolve_record["resolved"]
+        return False
+    resolved_name = resolve_record["resolved"]
 
     if resolved_name == alias_name:
         logger.info("write_alias: self-loop skipped (%r resolves to itself)", alias_name)
-        return
+        return False
 
     check_result = session.run(CHECK_EXISTING_ALIAS_CYPHER, alias_name=alias_name)
     check_record = check_result.single()
-    if check_record is not None and check_record["has_alias"]:
-        logger.info("write_alias: %r already aliased, first judgment wins", alias_name)
-        return
+    if check_record is not None:
+        if check_record["has_outgoing"]:
+            logger.info("write_alias: %r already aliased, first judgment wins", alias_name)
+            return False
+        if check_record["has_incoming"]:
+            logger.info(
+                "write_alias: %r node is canonical for others; first judgment wins", alias_name
+            )
+            return False
 
     session.run(WRITE_ALIAS_CYPHER, alias_name=alias_name, resolved_name=resolved_name)
+    return True

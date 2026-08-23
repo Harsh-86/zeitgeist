@@ -217,15 +217,16 @@ def test_record_judgment_does_not_merge_entity_nodes():
 
 
 def not_aliased_result():
-    """Canned result for the existing-alias check: alias has no parent yet."""
-    return FakeResult([{"has_alias": False}])
+    """Canned result for the existing-alias check: alias has neither an
+    outgoing nor an incoming ALIAS_OF edge yet."""
+    return FakeResult([{"has_outgoing": False, "has_incoming": False}])
 
 
 def test_write_alias_resolves_canonical_with_no_existing_alias():
     session = FakeSession(
         results=[FakeResult([{"resolved": "European Central Bank"}]), not_aliased_result()]
     )
-    graph.write_alias(session, "ECB", "European Central Bank")
+    result = graph.write_alias(session, "ECB", "European Central Bank")
 
     resolve_cypher, resolve_params = session.queries[0]
     assert resolve_cypher == graph.RESOLVE_CANONICAL_CYPHER
@@ -242,6 +243,7 @@ def test_write_alias_resolves_canonical_with_no_existing_alias():
     assert placeholders(write_cypher) == set(write_params)
     assert write_params == {"alias_name": "ECB", "resolved_name": "European Central Bank"}
     assert len(session.queries) == 3
+    assert result is True
 
 
 def test_write_alias_single_hop_follows_existing_alias_of_edge():
@@ -249,31 +251,36 @@ def test_write_alias_single_hop_follows_existing_alias_of_edge():
     session = FakeSession(
         results=[FakeResult([{"resolved": "European Central Bank"}]), not_aliased_result()]
     )
-    graph.write_alias(session, "Central Bank of Europe", "ECB")
+    result = graph.write_alias(session, "Central Bank of Europe", "ECB")
 
     _, write_params = session.queries[2]
     assert write_params == {
         "alias_name": "Central Bank of Europe",
         "resolved_name": "European Central Bank",
     }
+    assert result is True
 
 
-def test_write_alias_falls_back_to_canonical_name_when_not_found():
-    session = FakeSession(results=[FakeResult([]), not_aliased_result()])  # canonical missing
-    graph.write_alias(session, "ECB", "European Central Bank")
+def test_write_alias_returns_false_when_canonical_name_not_found():
+    """M1 fix: a missing canonical Entity node must skip guards+MERGE
+    entirely, not fall through and attempt a (no-op) write."""
+    session = FakeSession(results=[FakeResult([])])  # canonical missing
+    result = graph.write_alias(session, "ECB", "European Central Bank")
 
-    _, write_params = session.queries[2]
-    assert write_params == {"alias_name": "ECB", "resolved_name": "European Central Bank"}
+    assert result is False
+    assert len(session.queries) == 1
+    assert session.queries[0][0] == graph.RESOLVE_CANONICAL_CYPHER
 
 
 def test_write_alias_logs_warning_when_canonical_name_matches_no_entity(caplog):
-    session = FakeSession(results=[FakeResult([]), not_aliased_result()])
+    session = FakeSession(results=[FakeResult([])])
     with caplog.at_level("WARNING", logger="zeitgeist.resolver.graph"):
-        graph.write_alias(session, "ECB", "European Central Bank")
+        result = graph.write_alias(session, "ECB", "European Central Bank")
     assert any(
         "European Central Bank" in message and "no Entity node" in message
         for message in caplog.messages
     )
+    assert result is False
 
 
 def test_write_alias_merges_edge_never_merges_nodes():
@@ -286,12 +293,13 @@ def test_write_alias_self_loop_is_a_noop(caplog):
     """Resolution collapsing to the alias itself must not MERGE anything."""
     session = FakeSession(results=[FakeResult([{"resolved": "ECB"}])])
     with caplog.at_level("INFO", logger="zeitgeist.resolver.graph"):
-        graph.write_alias(session, "ECB", "ECB")
+        result = graph.write_alias(session, "ECB", "ECB")
 
     # Only the resolve query ran; no existing-alias check, no MERGE write.
     assert len(session.queries) == 1
     assert session.queries[0][0] == graph.RESOLVE_CANONICAL_CYPHER
     assert any("self-loop" in message for message in caplog.messages)
+    assert result is False
 
 
 def test_write_alias_multi_parent_is_a_noop_first_judgment_wins(caplog):
@@ -299,11 +307,11 @@ def test_write_alias_multi_parent_is_a_noop_first_judgment_wins(caplog):
     session = FakeSession(
         results=[
             FakeResult([{"resolved": "European Central Bank"}]),
-            FakeResult([{"has_alias": True}]),
+            FakeResult([{"has_outgoing": True, "has_incoming": False}]),
         ]
     )
     with caplog.at_level("INFO", logger="zeitgeist.resolver.graph"):
-        graph.write_alias(session, "ECB", "European Central Bank")
+        result = graph.write_alias(session, "ECB", "European Central Bank")
 
     # Resolve + existing-alias check ran, but no MERGE write followed.
     assert len(session.queries) == 2
@@ -312,6 +320,36 @@ def test_write_alias_multi_parent_is_a_noop_first_judgment_wins(caplog):
         "already aliased" in message and "first judgment wins" in message
         for message in caplog.messages
     )
+    assert result is False
+
+
+def test_write_alias_incoming_edge_is_a_noop_canonical_for_others(caplog):
+    """C1 fix: alias_name already has an INCOMING ALIAS_OF edge (i.e. some
+    other node already treats it as canonical). Writing an outgoing edge
+    from it would form a chain (other -> alias_name -> resolved); must be
+    refused just like the outgoing case."""
+    session = FakeSession(
+        results=[
+            FakeResult([{"resolved": "Bigger Bank"}]),
+            FakeResult([{"has_outgoing": False, "has_incoming": True}]),
+        ]
+    )
+    with caplog.at_level("INFO", logger="zeitgeist.resolver.graph"):
+        result = graph.write_alias(session, "European Central Bank", "Bigger Bank")
+
+    # Resolve + existing-alias check ran, but no MERGE write followed.
+    assert len(session.queries) == 2
+    assert session.queries[1][0] == graph.CHECK_EXISTING_ALIAS_CYPHER
+    assert any(
+        "canonical for others" in message and "first judgment wins" in message
+        for message in caplog.messages
+    )
+    assert result is False
+
+
+def test_check_existing_alias_checks_both_directions():
+    assert "(alias)-[:ALIAS_OF]->(" in graph.CHECK_EXISTING_ALIAS_CYPHER
+    assert "(alias)<-[:ALIAS_OF]-(" in graph.CHECK_EXISTING_ALIAS_CYPHER
 
 
 def test_check_existing_alias_params_match_cypher_placeholders():

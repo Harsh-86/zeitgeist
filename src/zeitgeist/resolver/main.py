@@ -92,8 +92,11 @@ def run_cycle(session, judge: ErJudge, budget: DailyBudget, cfg) -> dict:
             )
             judged += 1
 
-            if verdict.verdict == "SAME" and verdict.confidence >= cfg.er_min_confidence:
-                graph.write_alias(session, alias_name=pair[0], canonical_name=pair[1])
+            if (
+                verdict.verdict == "SAME"
+                and verdict.confidence >= cfg.er_min_confidence
+                and graph.write_alias(session, alias_name=pair[0], canonical_name=pair[1])
+            ):
                 aliased += 1
 
     counters = {
