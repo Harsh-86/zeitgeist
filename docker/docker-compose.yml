@@ -138,9 +138,25 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
 
+  resolver:
+    build: { context: .., dockerfile: docker/Dockerfile }
+    command: ["python", "-m", "zeitgeist.resolver.main"]
+    environment:
+      <<: *service-env
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ER_MAX_CALLS_PER_DAY: ${ER_MAX_CALLS_PER_DAY:-100}
+      ER_BUDGET_STATE_PATH: /state/er_budget.json
+    volumes:
+      - resolver-state:/state
+    depends_on:
+      neo4j:
+        condition: service_healthy
+    restart: unless-stopped
+
 volumes:
   kafka-data:
   neo4j-data:
   ingestor-state:
   sampler-state:
   llm-state:
+  resolver-state:

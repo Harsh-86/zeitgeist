@@ -81,6 +81,95 @@ API key.
   llm-extractor` should show `llm call: in=... out=... cached=...` lines, and
   `MATCH (ev:Event {tier:'llm'}) RETURN count(ev)` in cypher-shell should grow.
 
+## Entity resolution (ER / resolver)
+
+The `resolver` service periodically (every `RESOLVER_INTERVAL_SECONDS`,
+default 3600s) scans the graph and does two things with Claude, writing only
+additive metadata/edges — it never merges, deletes, or rewrites existing
+nodes or edges:
+
+1. **Generic screening**: every never-screened `Entity` with at least
+   `ER_MIN_EVENTS` (default 3) `ACTOR1_IN` events is sent to the judge, which
+   decides whether the name is a generic role/description (e.g. `POLICE`,
+   `GOVERNMENT`) rather than a specific named entity. The verdict is written
+   as `is_generic` / `generic_confidence` / `generic_checked` properties on
+   the `Entity` node — no edges are touched by this step.
+2. **Pair judging**: candidate same-entity pairs (drawn from screened,
+   non-generic, not-yet-aliased entities) are judged for whether they refer
+   to the same real-world entity (e.g. abbreviation/variant spellings). Every
+   judged pair gets an immutable `ER_JUDGED` edge recording the verdict; a
+   `SAME` verdict at or above `ER_MIN_CONFIDENCE` (default 0.8) additionally
+   writes an `ALIAS_OF` edge from the alias to the canonical entity.
+
+It reuses the same `ANTHROPIC_API_KEY` as the LLM tier and shares
+`docker/.env` — no extra secret to provision. It only depends on `neo4j`
+being healthy (it never touches Kafka).
+
+- **Env file**: `docker/.env` additionally needs (or accepts the default):
+  ```
+  ER_MAX_CALLS_PER_DAY=100
+  ```
+  `docker/.env.example` defaults this to 100.
+- **Measured cost**: ER calls run ~$0.0003 each (short prompts — a handful of
+  sample relations per entity), so 100 calls/day is roughly $0.03/day
+  (~$1/month) — negligible next to the LLM-extractor tier.
+- **Budget**: `ER_MAX_CALLS_PER_DAY` caps combined screening + judging calls
+  per day, persisted in `er_budget.json` on the `resolver-state` volume,
+  independent of the sampler/llm-extractor budgets. The cycle stops the
+  instant the budget is exhausted (no partial reads past that point) and
+  picks up where it left off on the next `RESOLVER_INTERVAL_SECONDS` tick
+  once the daily counter resets at UTC midnight.
+- **Verify it's live**: `docker compose -f docker/docker-compose.yml logs -f
+  resolver` should show `resolver cycle: screened=N judged=N aliased=N
+  skipped=N budget_left=...` lines.
+- **Reading canonical names**: downstream readers should resolve any
+  `Entity` to its canonical form with:
+  ```cypher
+  MATCH (e:Entity)
+  OPTIONAL MATCH (e)-[:ALIAS_OF]->(c)
+  RETURN coalesce(c, e) AS canonical
+  ```
+  (single-hop is guaranteed — `ALIAS_OF` edges never chain).
+- **Reversibility — undo a bad alias**: every write this service makes is a
+  single edge or a few properties, so any mistake is a one-line Cypher fix
+  in `cypher-shell` (no restart needed):
+  ```cypher
+  // Don't know the canonical name, only that "X" looks wrongly aliased?
+  // Find what it currently resolves to first:
+  MATCH (a:Entity {name: "X"})-[:ALIAS_OF]->(c) RETURN c.name
+
+  // Delete a specific bad ALIAS_OF edge (does not touch either node):
+  MATCH (a:Entity {name: "ALIAS_NAME"})-[r:ALIAS_OF]->(c:Entity {name: "CANONICAL_NAME"})
+  DELETE r
+
+  // Flip a wrong is_generic verdict (also clears generic_checked so it gets
+  // re-screened next cycle, or set generic_checked = true to leave it fixed):
+  MATCH (e:Entity {name: "ENTITY_NAME"})
+  SET e.is_generic = false, e.generic_checked = null, e.generic_confidence = null
+
+  // To force a pair to be re-judged, delete its ER_JUDGED edge too (otherwise
+  // fetch_judged_pairs will keep skipping it):
+  MATCH (a:Entity {name: "A"})-[j:ER_JUDGED]->(b:Entity {name: "B"})
+  DELETE j
+  ```
+  Deleting an `ALIAS_OF` edge does not delete the `ER_JUDGED` edge that
+  produced it (or vice versa) — delete both if you want the pair judged
+  fresh. To stop the resolver entirely without losing its budget/state:
+  `docker compose -f docker/docker-compose.yml stop resolver`.
+- **Clearing a screening backlog faster**: generic screening runs before pair
+  judging every cycle and only stops once the daily budget is exhausted, so a
+  large backlog of never-screened entities can starve pair judging (and thus
+  `ALIAS_OF` edges) for a long time — screening is one-time per entity (it
+  never re-screens anything with `generic_checked` set), so a *temporary*
+  bump is safe and doesn't waste spend. Two documented levers, either used
+  temporarily then reverted:
+  - Raise `ER_MAX_CALLS_PER_DAY` in `docker/.env` for a few days to burn down
+    the backlog faster, then drop it back to the normal cap.
+  - Raise `ER_MIN_EVENTS` to shrink the universe of entities eligible for
+    screening in the first place (fewer, higher-signal entities per cycle).
+  Current operator decision: the cap stays at 100/day and the backlog is
+  left to drain over its natural ~3-week timeline — no bump applied.
+
 ## Known failure modes
 
 - **GDELT missed window / download error**: ingestor logs the failure and retries next
