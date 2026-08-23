@@ -18,11 +18,27 @@ from zeitgeist.budget import DailyBudget
 from zeitgeist.config import CLAIMS_TOPIC, LLM_TOPIC, Settings
 from zeitgeist.kafka_utils import make_consumer, make_producer
 from zeitgeist.llm.extract import LlmExtractor, claims_from_llm
+from zeitgeist.metrics import get_counter, start_metrics_server
 from zeitgeist.models import GdeltEvent
 
 logger = logging.getLogger("zeitgeist.llm")
 
 _LOG_EVERY = 25
+
+LLM_DISPOSITIONS_TOTAL = get_counter(
+    "zeitgeist_llm_dispositions_total",
+    "llm.queue messages by terminal disposition",
+    labelnames=("disposition",),
+)
+LLM_INPUT_TOKENS_TOTAL = get_counter(
+    "zeitgeist_llm_input_tokens_total", "Input tokens consumed by llm-extractor calls"
+)
+LLM_OUTPUT_TOKENS_TOTAL = get_counter(
+    "zeitgeist_llm_output_tokens_total", "Output tokens consumed by llm-extractor calls"
+)
+LLM_CACHED_TOKENS_TOTAL = get_counter(
+    "zeitgeist_llm_cached_tokens_total", "Cache-read input tokens consumed by llm-extractor calls"
+)
 
 
 def process_event(
@@ -55,12 +71,13 @@ def process_event(
         return "budget_exhausted"
 
     llm_claims, usage = extractor.extract(event, article_text)
-    logger.info(
-        "llm call: in=%d out=%d cached=%d",
-        usage.get("input_tokens") or 0,
-        usage.get("output_tokens") or 0,
-        usage.get("cache_read_input_tokens") or 0,
-    )
+    input_tokens = usage.get("input_tokens") or 0
+    output_tokens = usage.get("output_tokens") or 0
+    cached_tokens = usage.get("cache_read_input_tokens") or 0
+    LLM_INPUT_TOKENS_TOTAL.inc(input_tokens)
+    LLM_OUTPUT_TOKENS_TOTAL.inc(output_tokens)
+    LLM_CACHED_TOKENS_TOTAL.inc(cached_tokens)
+    logger.info("llm call: in=%d out=%d cached=%d", input_tokens, output_tokens, cached_tokens)
 
     if not llm_claims:
         return "no_claims"
@@ -103,6 +120,7 @@ def process_one(
         return None
     consumer.commit(message=message, asynchronous=False)
     dispositions[disposition] = dispositions.get(disposition, 0) + 1
+    LLM_DISPOSITIONS_TOTAL.labels(disposition=disposition).inc()
     return disposition
 
 
@@ -113,6 +131,9 @@ def main() -> None:
     if not settings.anthropic_api_key:
         logger.error("ANTHROPIC_API_KEY not set; exiting")
         sys.exit(1)
+
+    if settings.metrics_port > 0:
+        start_metrics_server(settings.metrics_port)
 
     client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
     extractor = LlmExtractor(client, settings.llm_model)

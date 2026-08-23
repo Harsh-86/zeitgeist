@@ -67,3 +67,52 @@ def test_batcher_commit_skips_commit_when_flush_reports_undelivered(caplog):
     assert any("3" in r.message for r in caplog.records)
     # pending is kept so a later commit point retries.
     assert batcher.pending == 1
+
+
+# -- bool-return contract -------------------------------------------------
+
+
+def test_commit_returns_true_when_consumer_commit_ran():
+    calls = []
+    batcher = Batcher(RecordingProducer(calls), RecordingConsumer(calls))
+    assert batcher.commit() is True
+
+
+def test_commit_returns_false_when_flush_reports_undelivered():
+    calls = []
+    producer = RecordingProducer(calls, flush_return=1)
+    batcher = Batcher(producer, RecordingConsumer(calls))
+    assert batcher.commit() is False
+
+
+def test_record_returns_none_below_threshold():
+    calls = []
+    batcher = Batcher(RecordingProducer(calls), RecordingConsumer(calls), threshold=3)
+    assert batcher.record() is None
+    assert calls == []
+
+
+def test_record_returns_commit_result_at_threshold():
+    calls = []
+    batcher = Batcher(RecordingProducer(calls), RecordingConsumer(calls), threshold=1)
+    assert batcher.record() is True
+
+
+def test_record_returns_false_at_threshold_when_undelivered():
+    calls = []
+    producer = RecordingProducer(calls, flush_return=2)
+    batcher = Batcher(producer, RecordingConsumer(calls), threshold=1)
+    assert batcher.record() is False
+
+
+def test_maybe_commit_idle_returns_none_when_nothing_pending():
+    calls = []
+    batcher = Batcher(RecordingProducer(calls), RecordingConsumer(calls))
+    assert batcher.maybe_commit_idle() is None
+
+
+def test_maybe_commit_idle_returns_commit_result_when_pending():
+    calls = []
+    batcher = Batcher(RecordingProducer(calls), RecordingConsumer(calls), threshold=100)
+    batcher.record()
+    assert batcher.maybe_commit_idle() is True

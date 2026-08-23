@@ -6,6 +6,7 @@ import pytest
 from neo4j.exceptions import ServiceUnavailable
 
 from zeitgeist.resolver import graph as resolver_graph
+from zeitgeist.resolver import main as resolver_main
 from zeitgeist.resolver.judge import GenericVerdict, PairVerdict
 from zeitgeist.resolver.main import main, run_cycle, run_cycle_with_retry
 
@@ -99,7 +100,14 @@ def make_cfg(er_min_events=3, er_min_confidence=0.8):
     return SimpleNamespace(er_min_events=er_min_events, er_min_confidence=er_min_confidence)
 
 
-EMPTY_COUNTERS = {"screened": 0, "judged": 0, "aliased": 0, "skipped": 0, "budget_left": True}
+EMPTY_COUNTERS = {
+    "screened": 0,
+    "generic": 0,
+    "judged": 0,
+    "aliased": 0,
+    "skipped": 0,
+    "budget_left": True,
+}
 
 
 # ---- screening step ----------------------------------------------------
@@ -120,7 +128,7 @@ def test_screening_marks_generic_entity_and_counts_screened():
 
     counters = run_cycle(session, judge, budget, make_cfg())
 
-    assert counters == {**EMPTY_COUNTERS, "screened": 1}
+    assert counters == {**EMPTY_COUNTERS, "screened": 1, "generic": 1}
     assert budget.calls == 1
     mark_calls = [q for q in session.queries if q[0] == resolver_graph.MARK_GENERIC_CYPHER]
     assert mark_calls == [
@@ -168,7 +176,7 @@ def test_screening_multiple_entities_mixed_outcomes():
 
     counters = run_cycle(session, judge, budget, make_cfg())
 
-    assert counters == {**EMPTY_COUNTERS, "screened": 1, "skipped": 1}
+    assert counters == {**EMPTY_COUNTERS, "screened": 1, "generic": 1, "skipped": 1}
     assert budget.calls == 2
     assert [c[0] for c in judge.screen_calls] == ["POLICE", "NATO"]
 
@@ -462,6 +470,7 @@ def test_counters_accurate_across_screening_and_pairing():
 
     assert counters == {
         "screened": 1,
+        "generic": 1,
         "judged": 1,
         "aliased": 1,
         "skipped": 0,
@@ -574,3 +583,81 @@ def test_main_exits_nonzero_when_anthropic_api_key_missing(monkeypatch, caplog):
 
     assert exc_info.value.code != 0
     assert any("ANTHROPIC_API_KEY" in record.message for record in caplog.records)
+
+
+# ---- main(): metrics server wiring and per-cycle counters -----------------
+
+
+class _StopLoop(Exception):
+    """Escapes main()'s infinite loop after the first iteration in tests."""
+
+
+class _FakeMainSession:
+    def run(self, *a, **k):
+        return None
+
+    def close(self):
+        pass
+
+
+class _FakeMainDriver:
+    def session(self):
+        return _FakeMainSession()
+
+
+def _run_main_one_iteration(monkeypatch, cycle_counters=None):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setattr(resolver_main.anthropic, "Anthropic", lambda **k: object())
+    monkeypatch.setattr(resolver_main, "ErJudge", lambda *a, **k: object())
+    monkeypatch.setattr(
+        resolver_main.GraphDatabase, "driver", lambda *a, **k: _FakeMainDriver()
+    )
+    counters = cycle_counters or dict(EMPTY_COUNTERS)
+    monkeypatch.setattr(
+        resolver_main,
+        "run_cycle_with_retry",
+        lambda driver, session, judge, budget, cfg: (session, counters),
+    )
+    monkeypatch.setattr(
+        resolver_main.time, "sleep", lambda seconds: (_ for _ in ()).throw(_StopLoop())
+    )
+    with pytest.raises(_StopLoop):
+        resolver_main.main()
+
+
+def test_main_starts_metrics_server_when_port_configured(monkeypatch):
+    monkeypatch.setenv("METRICS_PORT", "9305")
+    calls = []
+    monkeypatch.setattr(resolver_main, "start_metrics_server", lambda port: calls.append(port))
+    _run_main_one_iteration(monkeypatch)
+    assert calls == [9305]
+
+
+def test_main_does_not_start_metrics_server_when_port_is_zero(monkeypatch):
+    monkeypatch.delenv("METRICS_PORT", raising=False)
+    calls = []
+    monkeypatch.setattr(resolver_main, "start_metrics_server", lambda port: calls.append(port))
+    _run_main_one_iteration(monkeypatch)
+    assert calls == []
+
+
+def test_main_increments_counters_from_run_cycle_once_per_cycle(monkeypatch):
+    before_screened = resolver_main.RESOLVER_SCREENED_TOTAL._value.get()
+    before_generic = resolver_main.RESOLVER_GENERIC_TOTAL._value.get()
+    before_judged = resolver_main.RESOLVER_JUDGED_TOTAL._value.get()
+    before_aliased = resolver_main.RESOLVER_ALIASED_TOTAL._value.get()
+
+    cycle_counters = {
+        "screened": 3,
+        "generic": 1,
+        "judged": 2,
+        "aliased": 1,
+        "skipped": 0,
+        "budget_left": True,
+    }
+    _run_main_one_iteration(monkeypatch, cycle_counters=cycle_counters)
+
+    assert resolver_main.RESOLVER_SCREENED_TOTAL._value.get() == before_screened + 3
+    assert resolver_main.RESOLVER_GENERIC_TOTAL._value.get() == before_generic + 1
+    assert resolver_main.RESOLVER_JUDGED_TOTAL._value.get() == before_judged + 2
+    assert resolver_main.RESOLVER_ALIASED_TOTAL._value.get() == before_aliased + 1

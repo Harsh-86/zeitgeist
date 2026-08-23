@@ -44,16 +44,29 @@ class Batcher:
         self._threshold = threshold
         self.pending = 0
 
-    def record(self) -> None:
+    def record(self) -> bool | None:
+        """Returns the result of commit() if the threshold was hit this call,
+        else None (no commit was attempted).
+        """
         self.pending += 1
         if self.pending >= self._threshold:
-            self.commit()
+            return self.commit()
+        return None
 
-    def maybe_commit_idle(self) -> None:
+    def maybe_commit_idle(self) -> bool | None:
+        """Returns the result of commit() if a commit was attempted (pending > 0),
+        else None (nothing was pending, so no commit was attempted).
+        """
         if self.pending > 0:
-            self.commit()
+            return self.commit()
+        return None
 
-    def commit(self) -> None:
+    def commit(self) -> bool:
+        """Flushes the producer, then commits offsets iff nothing was left
+        undelivered. Returns True when consumer.commit actually ran, False
+        when it was skipped. Callers that keep batch-local counters (e.g. for
+        durable-only metrics) should only fold them into durable state on True.
+        """
         undelivered = self._producer.flush(10)
         if undelivered > 0:
             logger.error(
@@ -61,6 +74,7 @@ class Batcher:
                 "so pending offsets retry at the next commit point",
                 undelivered,
             )
-            return
+            return False
         self._consumer.commit(asynchronous=False)
         self.pending = 0
+        return True

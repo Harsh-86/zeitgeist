@@ -5,6 +5,7 @@ import pytest
 
 from tests.unit.test_models import make_event
 from zeitgeist.config import CLAIMS_TOPIC
+from zeitgeist.llm import main as llm_main
 from zeitgeist.llm.extract import LlmClaim
 from zeitgeist.llm.main import main, process_event, process_one
 from zeitgeist.models import Claim
@@ -385,6 +386,74 @@ def test_process_one_accumulates_dispositions_across_calls():
     assert dispositions == {"undecodable": 2}
 
 
+# ---- metrics instrumentation ----
+
+
+def test_extract_call_increments_token_counters_from_usage_dict():
+    event = make_event()
+    _, produce = recording_produce()
+    extractor = FakeExtractor(llm_claims=ONE_CLAIM, usage=USAGE)
+    before_in = llm_main.LLM_INPUT_TOKENS_TOTAL._value.get()
+    before_out = llm_main.LLM_OUTPUT_TOKENS_TOTAL._value.get()
+    before_cached = llm_main.LLM_CACHED_TOKENS_TOTAL._value.get()
+
+    process_event(event.to_json(), ok_html_client(), extractor, AlwaysUnderBudget(), produce)
+
+    assert llm_main.LLM_INPUT_TOKENS_TOTAL._value.get() == before_in + USAGE["input_tokens"]
+    assert llm_main.LLM_OUTPUT_TOKENS_TOTAL._value.get() == before_out + USAGE["output_tokens"]
+    assert llm_main.LLM_CACHED_TOKENS_TOTAL._value.get() == before_cached
+
+
+def test_usage_with_none_cache_tokens_increments_cached_counter_by_zero():
+    event = make_event()
+    _, produce = recording_produce()
+    extractor = FakeExtractor(
+        llm_claims=ONE_CLAIM,
+        usage={"input_tokens": 10, "output_tokens": 5, "cache_read_input_tokens": None},
+    )
+    before_cached = llm_main.LLM_CACHED_TOKENS_TOTAL._value.get()
+
+    process_event(event.to_json(), ok_html_client(), extractor, AlwaysUnderBudget(), produce)
+
+    assert llm_main.LLM_CACHED_TOKENS_TOTAL._value.get() == before_cached
+
+
+def test_process_one_increments_disposition_counter_for_its_label():
+    event = make_event()
+    order = []
+    producer = RecordingProducer(order)
+    consumer = RecordingConsumer(order)
+    message = FakeMessage(value=event.to_json(), key=b"k", error=None)
+    extractor = FakeExtractor(llm_claims=ONE_CLAIM, usage=USAGE)
+    dispositions = {}
+    before = llm_main.LLM_DISPOSITIONS_TOTAL.labels(disposition="extracted")._value.get()
+
+    process_one(
+        ok_html_client(), extractor, AlwaysUnderBudget(), producer, consumer, message, dispositions
+    )
+
+    assert llm_main.LLM_DISPOSITIONS_TOTAL.labels(disposition="extracted")._value.get() == (
+        before + 1
+    )
+
+
+def test_process_one_does_not_increment_disposition_counter_when_commit_skipped():
+    event = make_event()
+    order = []
+    producer = RecordingProducer(order, flush_return=3)
+    consumer = RecordingConsumer(order)
+    message = FakeMessage(value=event.to_json(), key=b"k", error=None)
+    extractor = FakeExtractor(llm_claims=ONE_CLAIM, usage=USAGE)
+    dispositions = {}
+    before = llm_main.LLM_DISPOSITIONS_TOTAL.labels(disposition="extracted")._value.get()
+
+    process_one(
+        ok_html_client(), extractor, AlwaysUnderBudget(), producer, consumer, message, dispositions
+    )
+
+    assert llm_main.LLM_DISPOSITIONS_TOTAL.labels(disposition="extracted")._value.get() == before
+
+
 # ---- main(): missing ANTHROPIC_API_KEY ----
 
 
@@ -396,3 +465,41 @@ def test_main_exits_nonzero_when_anthropic_api_key_missing(monkeypatch, caplog):
 
     assert exc_info.value.code != 0
     assert any("ANTHROPIC_API_KEY" in record.message for record in caplog.records)
+
+
+# ---- main(): metrics server wiring ----
+
+
+class _StopLoop(Exception):
+    """Escapes main()'s infinite loop after the first iteration in tests."""
+
+
+class _RaisingConsumer:
+    def poll(self, timeout):
+        raise _StopLoop()
+
+
+def _run_main_one_iteration(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setattr(llm_main.anthropic, "Anthropic", lambda **k: object())
+    monkeypatch.setattr(llm_main, "LlmExtractor", lambda *a, **k: object())
+    monkeypatch.setattr(llm_main, "make_consumer", lambda *a, **k: _RaisingConsumer())
+    monkeypatch.setattr(llm_main, "make_producer", lambda bootstrap: object())
+    with pytest.raises(_StopLoop):
+        main()
+
+
+def test_main_starts_metrics_server_when_port_configured(monkeypatch):
+    monkeypatch.setenv("METRICS_PORT", "9303")
+    calls = []
+    monkeypatch.setattr(llm_main, "start_metrics_server", lambda port: calls.append(port))
+    _run_main_one_iteration(monkeypatch)
+    assert calls == [9303]
+
+
+def test_main_does_not_start_metrics_server_when_port_is_zero(monkeypatch):
+    monkeypatch.delenv("METRICS_PORT", raising=False)
+    calls = []
+    monkeypatch.setattr(llm_main, "start_metrics_server", lambda port: calls.append(port))
+    _run_main_one_iteration(monkeypatch)
+    assert calls == []

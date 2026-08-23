@@ -24,6 +24,7 @@ from neo4j import GraphDatabase
 from zeitgeist.budget import DailyBudget
 from zeitgeist.config import Settings
 from zeitgeist.graph.main import RETRYABLE, _run_with_retry
+from zeitgeist.metrics import get_counter, start_metrics_server
 from zeitgeist.resolver import candidates, graph
 from zeitgeist.resolver.judge import ErJudge
 
@@ -31,14 +32,28 @@ logger = logging.getLogger("zeitgeist.resolver")
 
 _SAMPLE_RELATIONS_LIMIT = 5
 
+RESOLVER_SCREENED_TOTAL = get_counter(
+    "zeitgeist_resolver_screened_total", "Entities screened for genericness per cycle"
+)
+RESOLVER_GENERIC_TOTAL = get_counter(
+    "zeitgeist_resolver_generic_total", "Entities marked generic per cycle"
+)
+RESOLVER_JUDGED_TOTAL = get_counter(
+    "zeitgeist_resolver_judged_total", "Candidate pairs judged per cycle"
+)
+RESOLVER_ALIASED_TOTAL = get_counter(
+    "zeitgeist_resolver_aliased_total", "ALIAS_OF edges written per cycle"
+)
+
 
 def run_cycle(session, judge: ErJudge, budget: DailyBudget, cfg) -> dict:
     """Run one resolver cycle: screen unscreened entities, then judge
     candidate pairs, stopping instantly once the daily budget is exhausted.
 
-    Returns a counters dict: screened/judged/aliased/skipped/budget_left.
+    Returns a counters dict: screened/generic/judged/aliased/skipped/budget_left.
     """
     screened = 0
+    generic = 0
     judged = 0
     aliased = 0
     skipped = 0
@@ -58,6 +73,8 @@ def run_cycle(session, judge: ErJudge, budget: DailyBudget, cfg) -> dict:
 
         graph.mark_generic(session, name, verdict.generic, verdict.confidence)
         screened += 1
+        if verdict.generic:
+            generic += 1
 
     if not budget_exhausted:
         entities = graph.fetch_entities(session, min_events=cfg.er_min_events)
@@ -101,6 +118,7 @@ def run_cycle(session, judge: ErJudge, budget: DailyBudget, cfg) -> dict:
 
     counters = {
         "screened": screened,
+        "generic": generic,
         "judged": judged,
         "aliased": aliased,
         "skipped": skipped,
@@ -151,6 +169,9 @@ def main() -> None:
         logger.error("ANTHROPIC_API_KEY not set; exiting")
         sys.exit(1)
 
+    if settings.metrics_port > 0:
+        start_metrics_server(settings.metrics_port)
+
     client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
     judge = ErJudge(client, settings.llm_model)
 
@@ -165,7 +186,11 @@ def main() -> None:
     logger.info("resolver starting (interval=%ds)", settings.resolver_interval_seconds)
     while True:
         try:
-            session, _counters = run_cycle_with_retry(driver, session, judge, budget, settings)
+            session, counters = run_cycle_with_retry(driver, session, judge, budget, settings)
+            RESOLVER_SCREENED_TOTAL.inc(counters["screened"])
+            RESOLVER_GENERIC_TOTAL.inc(counters["generic"])
+            RESOLVER_JUDGED_TOTAL.inc(counters["judged"])
+            RESOLVER_ALIASED_TOTAL.inc(counters["aliased"])
         except Exception:
             logger.exception("resolver cycle failed; continuing after interval")
         time.sleep(settings.resolver_interval_seconds)
