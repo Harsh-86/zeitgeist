@@ -115,7 +115,14 @@ def _init_freshness_from_state(state: IngestorState) -> None:
     if stamp is None:
         return
     # GDELT stamps are naive UTC timestamps with no timezone component to parse.
-    stamp_dt = datetime.strptime(stamp, "%Y%m%d%H%M%S").replace(tzinfo=UTC)
+    try:
+        stamp_dt = datetime.strptime(stamp, "%Y%m%d%H%M%S").replace(tzinfo=UTC)
+    except ValueError:
+        # Never-crash rule: a corrupt persisted stamp shouldn't kill boot any
+        # earlier than it otherwise would. Leave the gauge at 0 and carry on;
+        # the next successful cycle will set it correctly.
+        logger.warning("corrupt freshness stamp in state, skipping seed: %r", stamp)
+        return
     LAST_SUCCESS_TIMESTAMP.set(stamp_dt.timestamp())
 
 

@@ -74,6 +74,9 @@ def process_event(
     input_tokens = usage.get("input_tokens") or 0
     output_tokens = usage.get("output_tokens") or 0
     cached_tokens = usage.get("cache_read_input_tokens") or 0
+    # Token counters are SPEND-gated (not commit-gated): a redelivered message
+    # re-spends real tokens, so counting at API-call time keeps the cost panel
+    # truthful.
     LLM_INPUT_TOKENS_TOTAL.inc(input_tokens)
     LLM_OUTPUT_TOKENS_TOTAL.inc(output_tokens)
     LLM_CACHED_TOKENS_TOTAL.inc(cached_tokens)

@@ -361,6 +361,19 @@ def test_init_freshness_from_state_leaves_gauge_untouched_when_no_state(tmp_path
     assert ingestor_main.LAST_SUCCESS_TIMESTAMP._value.get() == before
 
 
+def test_init_freshness_from_state_survives_garbage_stamp(tmp_path, caplog):
+    """A corrupt persisted stamp must never crash boot (never-crash rule) -
+    log a warning and leave the gauge untouched instead.
+    """
+    state = make_state(tmp_path)
+    state.save("not-a-valid-stamp")
+    before = ingestor_main.LAST_SUCCESS_TIMESTAMP._value.get()
+    with caplog.at_level("WARNING"):
+        ingestor_main._init_freshness_from_state(state)
+    assert ingestor_main.LAST_SUCCESS_TIMESTAMP._value.get() == before
+    assert "corrupt freshness stamp" in caplog.text
+
+
 # -- main(): metrics server wiring ---------------------------------------------
 
 

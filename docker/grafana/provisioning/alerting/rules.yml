@@ -87,3 +87,44 @@ groups:
           summary: "A Kafka consumer group is falling behind by more than 10000 messages."
         labels:
           severity: warning
+
+      - uid: zeitgeist-target-down
+        title: "Scrape target down"
+        condition: C
+        data:
+          - refId: A
+            queryType: ""
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              editorMode: code
+              expr: min(up)
+              instant: true
+              range: false
+              refId: A
+          - refId: C
+            queryType: ""
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: "__expr__"
+            model:
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    type: lt
+                    params: [1]
+                  operator:
+                    type: and
+                  query:
+                    params: ["C"]
+                  reducer:
+                    type: last
+                    params: []
+              refId: C
+        noDataState: Alerting
+        execErrState: Alerting
+        for: 10m
+        annotations:
+          summary: "At least one Prometheus scrape target is down (min(up) < 1) — a service's /metrics endpoint is unreachable."
+        labels:
+          severity: warning

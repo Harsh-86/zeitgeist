@@ -177,6 +177,165 @@ being healthy (it never touches Kafka).
   Current operator decision: the cap stays at 100/day and the backlog is
   left to drain over its natural ~3-week timeline — no bump applied.
 
+## Observability (Prometheus + Grafana)
+
+Prometheus and Grafana are provisioned as code (`docker/grafana/provisioning/`,
+`docker/grafana/dashboards/zeitgeist.json`) and come up with `docker compose
+-f docker/docker-compose.yml up -d` alongside the rest of the stack. Both
+bind to loopback only, matching the same "not on 0.0.0.0" policy as Neo4j.
+
+- **URLs** (loopback only — see the SSH tunnel recipe below to reach them
+  from your laptop):
+  - Prometheus: `http://127.0.0.1:9090`
+  - Grafana: `http://127.0.0.1:3000` (dashboard: "Zeitgeist Overview",
+    `uid: zeitgeist-main`)
+- **Grafana login**: user `admin`, password from `GRAFANA_PASSWORD` in
+  `docker/.env` (falls back to `zeitgeist-dev` if unset — fine for local
+  dev, set a real value on the VPS the same way `NEO4J_PASSWORD` is set).
+  `docker/.env.example` documents the placeholder.
+- **API's public port also serves metrics (controller ruling)**: the `api`
+  service's port 8000 is published outside loopback (it's the public
+  dashboard/API endpoint) and it also serves `/metrics` on that same port.
+  This is a conscious acceptance, not an oversight: its contents are
+  non-sensitive by design — graph counts are already public via `/stats`,
+  and the rest is process internals (request counts, latencies) with no
+  secrets or user data. Every other observability surface (Prometheus,
+  Grafana, and every other service's own `/metrics`) stays loopback-only;
+  `api` is the one deliberate exception.
+- **SSH tunnel from your laptop to the VPS** (both services are loopback-only
+  on the server, same reasoning as Neo4j/Kafka in the Provision section
+  above):
+  ```bash
+  ssh -L 3000:127.0.0.1:3000 -L 9090:127.0.0.1:9090 user@host
+  ```
+  Then open `http://127.0.0.1:3000` (Grafana) and `http://127.0.0.1:9090`
+  (Prometheus) locally as usual. Keep the SSH session open for the duration.
+
+### Alerts
+
+Three rules, all in Grafana-managed alerting (folder `zeitgeist`, group
+`zeitgeist-alerts`), evaluated every 1m:
+
+- **`Pipeline stalled (freshness)`** — `time() - zeitgeist_last_success_timestamp
+  > 2700` for 5m (i.e. no successful ingestor run in ~45+ minutes).
+  `noDataState: Alerting` is deliberate: if the ingestor's `/metrics`
+  endpoint disappears entirely (container stopped/crashed — confirmed by
+  live test below, this actually shows up as the *series vanishing*, not a
+  climbing number, because Prometheus stale-marks a metric as soon as a
+  scrape fails outright rather than waiting out its lookback window), that
+  is itself staleness and must alert, not go silent.
+  **First response**: `docker compose -f docker/docker-compose.yml ps
+  ingestor` and `... logs --tail 100 ingestor`. Most likely causes: GDELT
+  download failing repeatedly, container crash-looping, or the container
+  stopped. Restart with `docker compose -f docker/docker-compose.yml start
+  ingestor` (or `up -d ingestor` if it needs rebuilding); freshness should
+  drop back to a small number within one poll cycle of the ingestor's next
+  successful run.
+- **`Kafka consumer lag high`** — `max(kafka_consumergroup_lag) > 10000`
+  for 15m across any of the 5 consumer groups (`api-broadcast`, `extractor`,
+  `graph-writer`, `llm-extractor`, `sampler`). `noDataState: OK` here (no
+  lag data isn't itself a problem the way no freshness data is).
+  **First response**: check which group via the "Consumer lag per group"
+  panel or `curl -s http://127.0.0.1:9090/api/v1/query?query=kafka_consumergroup_lag`,
+  then `docker compose -f docker/docker-compose.yml logs --tail 100
+  <that-service>` — look for the consumer crash-looping, throwing on a bad
+  message, or simply being slower than the produce rate (e.g. LLM tier
+  backed up behind its daily budget cap). Restarting the stuck consumer is
+  usually sufficient; Kafka retains the backlog.
+  **Coverage gap, honestly stated**: this rule depends on `kafka-exporter`
+  itself being alive to expose `kafka_consumergroup_lag` at all — if the
+  exporter dies, the lag alert goes quiet rather than firing. It's also
+  numerically blind to the two lowest-volume consumers, `llm-extractor` and
+  `resolver`: their throughput is so low (gated by daily LLM/ER call
+  budgets) that even a fully stuck consumer may never accumulate 10000
+  unconsumed messages to cross the threshold. The new `Scrape target down`
+  rule below closes both gaps — it fires on the exporter itself going dark,
+  and on any consumer's process dying outright, independent of message
+  volume.
+- **`Scrape target down`** — `min(up) < 1` for 10m (i.e. at least one
+  Prometheus scrape target — any of `api`, `extractor`, `graph-writer`,
+  `ingestor`, `kafka-exporter`, `llm-extractor`, `resolver`, `sampler` — is
+  unreachable). `noDataState: Alerting`, same reasoning as the freshness
+  rule: an empty `up` result is itself a failure worth flagging, not
+  something to stay silent on.
+  **First response**: `curl -s http://127.0.0.1:9090/api/v1/targets` (or the
+  Prometheus UI's Targets page) to see which target is down and why
+  (`lastError` field — usually a DNS/connection failure meaning the
+  container is stopped or crash-looping). `docker compose -f
+  docker/docker-compose.yml ps <service>` and `... logs --tail 100
+  <service>`, then `... start <service>` (or `up -d <service>`). This is
+  the general-purpose backstop for exactly the kind of outage demonstrated
+  live below — it would have caught the ingestor stall even without the
+  freshness metric's own alert.
+- **Alert delivery is not wired up yet**: all three rules route to Grafana's
+  default, unconfigured contact point (`grafana-default-email`) — they will
+  evaluate and show as firing in the Grafana UI/API, but no email or webhook
+  is actually sent anywhere. Actual notification delivery (real SMTP
+  credentials + recipient, or a webhook) is future work; until then, alert
+  state must be checked by looking at the dashboard/UI rather than waiting
+  for a page.
+
+### Cost panel pricing caveat
+
+The cost panel's PromQL hardcodes `claude-haiku` pricing ($1/$5 per M
+input/output tokens) — update `docker/grafana/dashboards/zeitgeist.json`
+panel 4 (the cost panel's query) if `LLM_MODEL` ever changes to a different
+model tier. Also note: cached-token reads (`zeitgeist_llm_cached_tokens_total`,
+priced by Anthropic at roughly 0.1x the input rate) are collected as a
+counter but are not priced into the panel's formula — the panel slightly
+underestimates actual spend whenever prompt caching is in effect.
+
+### Counter-restart caveat
+
+`zeitgeist_llm_input_tokens_total`, `_output_tokens_total`,
+`zeitgeist_llm_dispositions_total`, and similar `_total` counters are
+in-process (they reset to 0 whenever a service container restarts — e.g.
+during a deploy). Panels built on `increase(...)` or `rate(...)` over a
+window tolerate this correctly (a counter reset inside the window is
+detected and handled by PromQL), but reading a raw `_total` value directly
+as "spend so far" is misleading right after any restart — it reflects only
+activity since that process started, not the full day. If a cost/token/
+disposition panel reads 0 right after a deploy or restart, check `docker
+compose ... ps <service>` uptime before assuming something is broken; it
+may simply not have had a UTC-midnight-to-now window's worth of runtime yet
+for its own counters, separate from the sampler/LLM daily budget files
+(`llm_budget.json`, `sampler_budget.json`, `er_budget.json`) which persist
+across restarts on their `*-state` volumes.
+
+### Live-verified: freshness climbs on ingestor stop, recovers on restart
+
+Confirmed on 2026-08-23 against the live stack (`time() -
+zeitgeist_last_success_timestamp`, dashboard "Freshness" stat panel):
+
+| step | time (UTC) | freshness query result | ingestor target health |
+|---|---|---|---|
+| baseline | 21:33:37 | (ingestor stopped at this instant) | — |
+| sample 1 | 21:33:43 | `831.9s` (last good scrape before stop took effect) | up |
+| sample 2 | 21:34:43 | **no data** | down — `dial tcp: lookup ingestor on 127.0.0.11:53: no such host` |
+| sample 3 | 21:37:36 | **no data** | down (same DNS error) |
+| sample 4 | 21:38:36 | **no data** | down (same DNS error) |
+| sample 5 | 21:39:36 | **no data** | down (same DNS error) |
+| restart | 21:39:45 | `docker compose start ingestor` issued | — |
+| post-restart 1 | 21:40:01 | `11.9s` | up |
+| post-restart 2 | 21:40:22 | `32.1s` | up |
+| post-restart 3 | 21:40:42 | `52.4s` | up |
+
+**What actually happens, precisely**: `docker compose stop` removes the
+container from the Docker network's internal DNS, so the very next scrape
+attempt fails with a DNS lookup error (not "connection refused"). Prometheus
+stale-marks the series immediately on a failed scrape rather than serving
+the last known value for its usual 5-minute lookback window — so on the
+dashboard the "Freshness" stat panel does not visibly *climb*; it goes
+blank/"No data" almost immediately (within one ~15s scrape interval) and
+stays that way for as long as the container is stopped. This is exactly
+why the freshness alert rule uses `noDataState: Alerting` — a vanished
+metric is the real-world signature of a stalled pipeline here, not a
+climbing number. On restart, the ingestor's gauge is reseeded (the value
+observed above, `~12s`, is the seed/first-real-timestamp — see the LLM tier
+note above for the general pattern of in-process metrics resetting on
+restart) and then climbs normally with wall-clock time between polls, and
+the target flips back to `up` within one scrape cycle.
+
 ## Known failure modes
 
 - **GDELT missed window / download error**: ingestor logs the failure and retries next
