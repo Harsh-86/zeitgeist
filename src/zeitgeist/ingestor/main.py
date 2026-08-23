@@ -18,6 +18,7 @@ from zeitgeist.gdelt.client import (
 )
 from zeitgeist.gdelt.parser import parse_event_row
 from zeitgeist.kafka_utils import make_producer
+from zeitgeist.metrics import get_counter, get_gauge, start_metrics_server
 
 logger = logging.getLogger("zeitgeist.ingestor")
 
@@ -26,6 +27,31 @@ Send = Callable[[str, str, bytes], None]
 # Consecutive-404 thresholds (see run_cycle).
 LATEST_WINDOW_LOG_ESCALATION_ATTEMPTS = 10
 UPSTREAM_GAP_SKIP_ATTEMPTS = 5
+
+WINDOWS_TOTAL = get_counter(
+    "zeitgeist_windows_total", "GDELT windows successfully processed and saved to state"
+)
+EVENTS_PUBLISHED_TOTAL = get_counter(
+    "zeitgeist_events_published_total", "Events published to raw.events"
+)
+ROWS_SKIPPED_TOTAL = get_counter(
+    "zeitgeist_rows_skipped_total", "Malformed GDELT rows skipped during parsing"
+)
+WINDOWS_SKIPPED_UPSTREAM_TOTAL = get_counter(
+    "zeitgeist_windows_skipped_upstream_total",
+    "Windows skipped after repeated 404s from upstream GDELT",
+)
+LAST_SUCCESS_TIMESTAMP = get_gauge(
+    "zeitgeist_last_success_timestamp", "Unix timestamp of the last successful state save"
+)
+
+
+def _mark_freshness() -> None:
+    """Loop-liveness signal: set on any successful state.save, whether the window was
+    fully processed or skip-and-advanced past a persistent upstream gap. Freshness
+    measures the ingest loop making forward progress, not GDELT's delivery record.
+    """
+    LAST_SUCCESS_TIMESTAMP.set(time.time())
 
 
 class DeliveryTracker:
@@ -134,6 +160,8 @@ def run_cycle(
                 "window %s skipped — missing upstream after %d attempts", stamp, attempts
             )
             state.save(stamp)
+            _mark_freshness()
+            WINDOWS_SKIPPED_UPSTREAM_TOTAL.inc()
             misses.pop(stamp, None)
             continue
 
@@ -158,6 +186,10 @@ def run_cycle(
                 break
 
         state.save(stamp)
+        WINDOWS_TOTAL.inc()
+        EVENTS_PUBLISHED_TOTAL.inc(window_published)
+        ROWS_SKIPPED_TOTAL.inc(window_skipped)
+        _mark_freshness()
         misses.pop(stamp, None)
         logger.info(
             "window %s done published=%d skipped=%d", stamp, window_published, window_skipped
@@ -169,6 +201,8 @@ def run_cycle(
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     settings = Settings.from_env()
+    if settings.metrics_port > 0:
+        start_metrics_server(settings.metrics_port)
     client = GdeltClient(httpx.Client(follow_redirects=True))
     state = IngestorState(Path(settings.state_path))
     producer = make_producer(settings.kafka_bootstrap)

@@ -27,6 +27,7 @@ class Settings:
     resolver_interval_seconds: int
     er_min_confidence: float
     er_min_events: int
+    metrics_port: int
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -52,4 +53,5 @@ class Settings:
             resolver_interval_seconds=int(os.getenv("RESOLVER_INTERVAL_SECONDS", "3600")),
             er_min_confidence=float(os.getenv("ER_MIN_CONFIDENCE", "0.8")),
             er_min_events=int(os.getenv("ER_MIN_EVENTS", "3")),
+            metrics_port=int(os.getenv("METRICS_PORT", "0")),
         )

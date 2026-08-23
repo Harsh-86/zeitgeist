@@ -94,3 +94,15 @@ def test_resolver_env_overrides(monkeypatch):
     assert settings.resolver_interval_seconds == 120
     assert settings.er_min_confidence == 0.95
     assert settings.er_min_events == 5
+
+
+def test_metrics_port_default(monkeypatch):
+    monkeypatch.delenv("METRICS_PORT", raising=False)
+    settings = Settings.from_env()
+    assert settings.metrics_port == 0
+
+
+def test_metrics_port_env_override(monkeypatch):
+    monkeypatch.setenv("METRICS_PORT", "9100")
+    settings = Settings.from_env()
+    assert settings.metrics_port == 9100
