@@ -14,6 +14,8 @@ logger = logging.getLogger("zeitgeist.llm")
 MAX_LLM_CLAIMS = 5
 _END_TURN_STOP_REASONS = {"end_turn", "max_tokens"}
 _REQUIRED_KEYS = {"subject", "relation", "object", "detail", "confidence"}
+_MAX_NAME_LEN = 200
+_MAX_DETAIL_LEN = 500
 
 EXTRACTION_SYSTEM_PROMPT = (
     "You extract factual relationship claims from news articles for a knowledge graph.\n"
@@ -75,11 +77,11 @@ def _validate_item(item: object) -> LlmClaim | None:
         item["detail"],
         item["confidence"],
     )
-    if not isinstance(subject, str) or not subject.strip():
+    if not isinstance(subject, str) or not subject.strip() or len(subject) > _MAX_NAME_LEN:
         return None
-    if not isinstance(relation, str) or not relation.strip():
+    if not isinstance(relation, str) or not relation.strip() or len(relation) > _MAX_NAME_LEN:
         return None
-    if obj is not None and not isinstance(obj, str):
+    if obj is not None and (not isinstance(obj, str) or len(obj) > _MAX_NAME_LEN):
         return None
     if not isinstance(detail, str):
         return None
@@ -89,7 +91,7 @@ def _validate_item(item: object) -> LlmClaim | None:
         subject=subject,
         relation=relation,
         object=obj,
-        detail=detail,
+        detail=detail[:_MAX_DETAIL_LEN],
         confidence=max(0.0, min(1.0, float(confidence))),
     )
 
@@ -161,7 +163,8 @@ class LlmExtractor:
         usage = {
             "input_tokens": response.usage.input_tokens,
             "output_tokens": response.usage.output_tokens,
-            "cache_read_input_tokens": getattr(response.usage, "cache_read_input_tokens", 0),
+            "cache_read_input_tokens": getattr(response.usage, "cache_read_input_tokens", 0)
+            or 0,
         }
 
         if response.stop_reason not in _END_TURN_STOP_REASONS:

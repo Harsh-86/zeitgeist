@@ -63,3 +63,34 @@ def test_llm_budget_state_path_env_override(monkeypatch):
     monkeypatch.setenv("LLM_BUDGET_STATE_PATH", "state/custom_llm_budget.json")
     settings = Settings.from_env()
     assert settings.llm_budget_state_path == "state/custom_llm_budget.json"
+
+
+def test_resolver_defaults(monkeypatch):
+    for var in (
+        "ER_MAX_CALLS_PER_DAY",
+        "ER_BUDGET_STATE_PATH",
+        "RESOLVER_INTERVAL_SECONDS",
+        "ER_MIN_CONFIDENCE",
+        "ER_MIN_EVENTS",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    settings = Settings.from_env()
+    assert settings.er_max_calls_per_day == 100
+    assert settings.er_budget_state_path == "state/er_budget.json"
+    assert settings.resolver_interval_seconds == 3600
+    assert settings.er_min_confidence == 0.8
+    assert settings.er_min_events == 3
+
+
+def test_resolver_env_overrides(monkeypatch):
+    monkeypatch.setenv("ER_MAX_CALLS_PER_DAY", "50")
+    monkeypatch.setenv("ER_BUDGET_STATE_PATH", "state/custom_er_budget.json")
+    monkeypatch.setenv("RESOLVER_INTERVAL_SECONDS", "120")
+    monkeypatch.setenv("ER_MIN_CONFIDENCE", "0.95")
+    monkeypatch.setenv("ER_MIN_EVENTS", "5")
+    settings = Settings.from_env()
+    assert settings.er_max_calls_per_day == 50
+    assert settings.er_budget_state_path == "state/custom_er_budget.json"
+    assert settings.resolver_interval_seconds == 120
+    assert settings.er_min_confidence == 0.95
+    assert settings.er_min_events == 5

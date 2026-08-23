@@ -184,6 +184,71 @@ def test_parse_llm_claims_rejects_missing_confidence():
     assert parse_llm_claims(data) == []
 
 
+# ---- length caps (Rider A) ----
+
+
+def test_parse_llm_claims_rejects_overlong_subject():
+    data = json.dumps(
+        [{"subject": "A" * 201, "relation": "B", "object": None, "detail": "d", "confidence": 1.0}]
+    )
+    assert parse_llm_claims(data) == []
+
+
+def test_parse_llm_claims_accepts_subject_at_exactly_200_chars():
+    data = json.dumps(
+        [{"subject": "A" * 200, "relation": "B", "object": None, "detail": "d", "confidence": 1.0}]
+    )
+    assert len(parse_llm_claims(data)) == 1
+
+
+def test_parse_llm_claims_rejects_overlong_relation():
+    data = json.dumps(
+        [{"subject": "A", "relation": "R" * 201, "object": None, "detail": "d", "confidence": 1.0}]
+    )
+    assert parse_llm_claims(data) == []
+
+
+def test_parse_llm_claims_rejects_overlong_object():
+    data = json.dumps(
+        [{"subject": "A", "relation": "B", "object": "O" * 201, "detail": "d", "confidence": 1.0}]
+    )
+    assert parse_llm_claims(data) == []
+
+
+def test_parse_llm_claims_truncates_overlong_detail():
+    data = json.dumps(
+        [
+            {
+                "subject": "A",
+                "relation": "B",
+                "object": None,
+                "detail": "d" * 600,
+                "confidence": 1.0,
+            }
+        ]
+    )
+    claims = parse_llm_claims(data)
+    assert len(claims) == 1
+    assert len(claims[0].detail) == 500
+    assert claims[0].detail == "d" * 500
+
+
+def test_parse_llm_claims_accepts_detail_at_exactly_500_chars():
+    data = json.dumps(
+        [
+            {
+                "subject": "A",
+                "relation": "B",
+                "object": None,
+                "detail": "d" * 500,
+                "confidence": 1.0,
+            }
+        ]
+    )
+    claims = parse_llm_claims(data)
+    assert len(claims[0].detail) == 500
+
+
 # ---- LlmExtractor.extract ----
 
 
@@ -234,6 +299,15 @@ def test_extractor_returns_usage_with_cache_read_tokens():
     extractor = LlmExtractor(client, model="claude-haiku-4-5")
     _, usage = extractor.extract(make_event(), "text")
     assert usage["cache_read_input_tokens"] == 250
+
+
+def test_extractor_guards_none_cache_read_tokens():
+    """SDK 1.0: cache_read_input_tokens can be present but None, not just absent (Rider B)."""
+    response = _text_response(CLAIMS_JSON, cache_read=None)
+    client = FakeClient(response=response)
+    extractor = LlmExtractor(client, model="claude-haiku-4-5")
+    _, usage = extractor.extract(make_event(), "text")
+    assert usage["cache_read_input_tokens"] == 0
 
 
 def test_extractor_api_error_returns_empty_and_logs_warning(caplog):

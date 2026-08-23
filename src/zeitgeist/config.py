@@ -22,6 +22,11 @@ class Settings:
     llm_budget_state_path: str
     anthropic_api_key: str
     llm_model: str
+    er_max_calls_per_day: int
+    er_budget_state_path: str
+    resolver_interval_seconds: int
+    er_min_confidence: float
+    er_min_events: int
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -42,4 +47,9 @@ class Settings:
             ),
             anthropic_api_key=os.getenv("ANTHROPIC_API_KEY", ""),
             llm_model=os.getenv("LLM_MODEL", "claude-haiku-4-5"),
+            er_max_calls_per_day=int(os.getenv("ER_MAX_CALLS_PER_DAY", "100")),
+            er_budget_state_path=os.getenv("ER_BUDGET_STATE_PATH", "state/er_budget.json"),
+            resolver_interval_seconds=int(os.getenv("RESOLVER_INTERVAL_SECONDS", "3600")),
+            er_min_confidence=float(os.getenv("ER_MIN_CONFIDENCE", "0.8")),
+            er_min_events=int(os.getenv("ER_MIN_EVENTS", "3")),
         )
