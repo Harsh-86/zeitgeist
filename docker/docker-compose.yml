@@ -129,7 +129,9 @@ services:
     command: ["python", "-m", "zeitgeist.api.main"]
     environment: *service-env
     ports:
-      - "8000:8000"
+      # Loopback-only since Caddy fronts the public HTTPS door; direct :8000 stays
+      # available on the server itself for health checks and SSH-tunnel access.
+      - "127.0.0.1:8000:8000"
     depends_on:
       kafka-init:
         condition: service_completed_successfully
@@ -202,6 +204,19 @@ services:
       - prometheus
     restart: unless-stopped
 
+  caddy:
+    image: caddy:2.8
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - api
+    restart: unless-stopped
+
 volumes:
   kafka-data:
   neo4j-data:
@@ -211,3 +226,5 @@ volumes:
   resolver-state:
   prometheus-data:
   grafana-data:
+  caddy-data:
+  caddy-config:
