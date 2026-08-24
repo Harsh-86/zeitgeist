@@ -355,3 +355,11 @@ VPS (same privacy excludes as `scripts/deploy.sh`) and runs
 `/root/.ssh/authorized_keys`). Required GitHub repo secrets: `DEPLOY_SSH_KEY`
 (the private key file contents) and `DEPLOY_HOST` (the server IP).
 `scripts/deploy.sh` remains for manual/emergency deploys.
+
+### CD gap: bind-mounted config files
+
+`docker compose up -d` only recreates containers whose compose definition changed —
+edits to bind-mounted config files (Caddyfile, prometheus.yml, grafana provisioning)
+rsync to disk but are NOT reloaded automatically. After deploying such changes, run
+`docker compose -f docker/docker-compose.yml restart caddy` (or prometheus/grafana).
+Candidate future fix: add a reload step to the deploy workflow.
