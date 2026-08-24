@@ -10,6 +10,9 @@ SCHEMA_STATEMENTS = [
         "FOR (ev:Event) REQUIRE ev.event_id IS UNIQUE"
     ),
     "CREATE INDEX entity_name IF NOT EXISTS FOR (e:Entity) ON (e.name)",
+    # /recent sorts by observed_at over the whole graph; without this index
+    # Neo4j materializes and sorts every event per request.
+    "CREATE INDEX event_observed_at IF NOT EXISTS FOR (ev:Event) ON (ev.observed_at)",
 ]
 
 CLAIM_CYPHER = """

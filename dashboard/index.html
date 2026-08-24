@@ -43,9 +43,19 @@
       graph.graphData({ nodes: [...nodes.values()], links });
     }
 
-    const proto = location.protocol === "https:" ? "wss" : "ws";
-    const ws = new WebSocket(`${proto}://${location.host}/ws/claims`);
-    ws.onmessage = (msg) => addClaim(JSON.parse(msg.data));
+    function connectClaimsSocket() {
+      const proto = location.protocol === "https:" ? "wss" : "ws";
+      const ws = new WebSocket(`${proto}://${location.host}/ws/claims`);
+      ws.onmessage = (msg) => addClaim(JSON.parse(msg.data));
+    }
+
+    fetch("/recent")
+      .then((res) => res.json())
+      .then((data) => {
+        for (const claim of data.claims.slice().reverse()) addClaim(claim);
+      })
+      .catch((err) => console.error("failed to preload /recent", err))
+      .finally(connectClaimsSocket);
 
     async function refreshStats() {
       const res = await fetch("/stats");

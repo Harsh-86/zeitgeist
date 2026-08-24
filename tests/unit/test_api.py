@@ -15,8 +15,28 @@ class FakeResult:
         return {"n": self._value}
 
 
+RECENT_CLAIM_RECORDS = [
+    {"subject": "ECB", "relation": "criticizes", "object": "Italy"},
+    {"subject": "Fed", "relation": "raises", "object": "Rates"},
+]
+
+
+class FakeRecords:
+    def __init__(self, records):
+        self._records = records
+
+    def __iter__(self):
+        return iter(self._records)
+
+
 class FakeSession:
+    def __init__(self):
+        self.calls = []
+
     def run(self, query, **kwargs):
+        self.calls.append((query, kwargs))
+        if "ACTOR1_IN" in query:
+            return FakeRecords(RECENT_CLAIM_RECORDS)
         return FakeResult(42 if "Entity" in query else 7)
 
     def __enter__(self):
@@ -27,8 +47,11 @@ class FakeSession:
 
 
 class FakeDriver:
+    def __init__(self):
+        self.session_instance = FakeSession()
+
     def session(self):
-        return FakeSession()
+        return self.session_instance
 
 
 class FailingSession:
@@ -60,6 +83,63 @@ def test_healthz():
 def test_stats_counts_entities_and_events():
     response = make_client().get("/stats")
     assert response.json() == {"entities": 42, "events": 7}
+
+
+# -- /recent preload ------------------------------------------------------------
+
+
+def test_recent_returns_claims_from_cypher():
+    driver = FakeDriver()
+    client = TestClient(create_app(driver=driver, start_consumer=False))
+
+    response = client.get("/recent")
+
+    assert response.status_code == 200
+    assert response.json() == {"claims": RECENT_CLAIM_RECORDS}
+    query, kwargs = driver.session_instance.calls[-1]
+    assert "ACTOR1_IN" in query
+    assert kwargs["limit"] == 500
+
+
+def test_recent_limit_is_capped_at_1000():
+    driver = FakeDriver()
+    client = TestClient(create_app(driver=driver, start_consumer=False))
+
+    response = client.get("/recent?limit=5000")
+
+    assert response.status_code == 200
+    assert driver.session_instance.calls[-1][1]["limit"] == 1000
+
+
+def test_recent_limit_is_floored_at_1_for_zero():
+    driver = FakeDriver()
+    client = TestClient(create_app(driver=driver, start_consumer=False))
+
+    response = client.get("/recent?limit=0")
+
+    assert response.status_code == 200
+    assert driver.session_instance.calls[-1][1]["limit"] == 1
+
+
+def test_recent_limit_is_floored_at_1_for_negative():
+    driver = FakeDriver()
+    client = TestClient(create_app(driver=driver, start_consumer=False))
+
+    response = client.get("/recent?limit=-5")
+
+    assert response.status_code == 200
+    assert driver.session_instance.calls[-1][1]["limit"] == 1
+
+
+def test_recent_survives_neo4j_failure_and_returns_empty_claims(caplog):
+    client = TestClient(create_app(driver=FailingDriver(), start_consumer=False))
+
+    with caplog.at_level("WARNING"):
+        response = client.get("/recent")
+
+    assert response.status_code == 200
+    assert response.json() == {"claims": []}
+    assert any("recent" in r.message.lower() for r in caplog.records)
 
 
 def test_websocket_receives_broadcast():

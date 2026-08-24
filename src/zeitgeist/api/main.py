@@ -20,6 +20,12 @@ logger = logging.getLogger("zeitgeist.api")
 GRAPH_ENTITIES = get_gauge("zeitgeist_graph_entities", "Entities currently in the graph")
 GRAPH_EVENTS = get_gauge("zeitgeist_graph_events", "Events currently in the graph")
 
+RECENT_CLAIMS_QUERY = (
+    "MATCH (s:Entity)-[:ACTOR1_IN]->(ev:Event)-[:ACTOR2]->(o:Entity) "
+    "RETURN s.name AS subject, ev.relation AS relation, o.name AS object "
+    "ORDER BY ev.observed_at DESC LIMIT $limit"
+)
+
 _DEFAULT_DASHBOARD_INDEX = Path(__file__).resolve().parents[3] / "dashboard" / "index.html"
 
 
@@ -101,6 +107,21 @@ def create_app(driver=None, start_consumer: bool = False) -> FastAPI:
             entities = session.run("MATCH (e:Entity) RETURN count(e) AS n").single()["n"]
             events = session.run("MATCH (ev:Event) RETURN count(ev) AS n").single()["n"]
         return {"entities": entities, "events": events}
+
+    @app.get("/recent")
+    def recent(limit: int = 500) -> dict:
+        capped_limit = max(1, min(limit, 1000))
+        try:
+            with app.state.driver.session() as session:
+                result = session.run(RECENT_CLAIMS_QUERY, limit=capped_limit)
+                claims = [
+                    {"subject": r["subject"], "relation": r["relation"], "object": r["object"]}
+                    for r in result
+                ]
+        except Exception:
+            logger.warning("failed to fetch recent claims for /recent", exc_info=True)
+            return {"claims": []}
+        return {"claims": claims}
 
     @app.get("/")
     def index() -> FileResponse:
