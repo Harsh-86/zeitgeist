@@ -22,6 +22,7 @@ services:
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
       KAFKA_LOG_DIRS: /var/lib/kafka/data
+      KAFKA_HEAP_OPTS: ${KAFKA_HEAP_OPTS:--Xms512m -Xmx512m}
     ports:
       - "127.0.0.1:29092:29092"
     healthcheck:
@@ -49,6 +50,9 @@ services:
     image: neo4j:5-community
     environment:
       NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:-zeitgeist-dev}
+      NEO4J_server_memory_heap_initial__size: ${NEO4J_HEAP:-512m}
+      NEO4J_server_memory_heap_max__size: ${NEO4J_HEAP:-512m}
+      NEO4J_server_memory_pagecache_size: ${NEO4J_PAGECACHE:-512m}
     ports:
       - "127.0.0.1:7474:7474"
       - "127.0.0.1:7687:7687"
