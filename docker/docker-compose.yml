@@ -50,6 +50,7 @@ services:
     image: neo4j:5-community
     environment:
       NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:-zeitgeist-dev}
+      HEALTHCHECK_PASSWORD: ${NEO4J_PASSWORD:-zeitgeist-dev}
       NEO4J_server_memory_heap_initial__size: ${NEO4J_HEAP:-512m}
       NEO4J_server_memory_heap_max__size: ${NEO4J_HEAP:-512m}
       NEO4J_server_memory_pagecache_size: ${NEO4J_PAGECACHE:-512m}
@@ -59,11 +60,12 @@ services:
     volumes:
       - neo4j-data:/data
     healthcheck:
-      # NOTE: healthcheck env substitution across docker compose versions is unreliable,
-      # so this intentionally keeps the literal default password rather than
-      # $${NEO4J_PASSWORD:-zeitgeist-dev}. If you set a custom NEO4J_PASSWORD, the
-      # healthcheck will report unhealthy even though Neo4j itself is fine.
-      test: ["CMD", "cypher-shell", "-u", "neo4j", "-p", "zeitgeist-dev", "RETURN 1"]
+      # The password is injected into the container env (HEALTHCHECK_PASSWORD below — must NOT start with NEO4J_, the image maps that prefix to db config) and
+      # expanded by the container's shell at check time ($$ escapes compose-level
+      # interpolation). This keeps the healthcheck working with custom passwords —
+      # the literal-password version reported unhealthy on any non-default password,
+      # which silently blocked every service gated on neo4j health (found on VPS deploy).
+      test: ["CMD-SHELL", "cypher-shell -u neo4j -p \"$$HEALTHCHECK_PASSWORD\" 'RETURN 1'"]
       interval: 10s
       timeout: 10s
       retries: 12
