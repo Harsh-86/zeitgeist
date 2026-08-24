@@ -22,3 +22,26 @@ jobs:
       - uses: astral-sh/setup-uv@v5
       - run: uv sync
       - run: uv run pytest tests/integration -q -m integration
+
+  deploy:
+    runs-on: ubuntu-latest
+    # Production deploy: only on direct pushes to main, only after all tests pass.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [lint-and-unit, integration]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up deploy key
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts
+      - name: Rsync and restart stack
+        run: |
+          rsync -az --delete -e "ssh -i ~/.ssh/deploy_key" \
+            --exclude .git --exclude .venv --exclude .pytest_cache --exclude .ruff_cache \
+            --exclude state --exclude data \
+            --exclude docs --exclude .superpowers --exclude .claude --exclude .env \
+            ./ "root@${{ secrets.DEPLOY_HOST }}:/root/zeitgeist/"
+          ssh -i ~/.ssh/deploy_key "root@${{ secrets.DEPLOY_HOST }}" \
+            "cd /root/zeitgeist && docker compose -f docker/docker-compose.yml up -d --build"

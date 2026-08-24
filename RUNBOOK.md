@@ -344,3 +344,14 @@ the target flips back to `up` within one scrape cycle.
   `kafka-data` preserves the log.
 - **Restore from backup**: stop stack, `neo4j-admin database load` from the newest
   dump in `~/backups`, start stack.
+
+## Continuous deployment
+
+Pushes to `main` deploy automatically: the `deploy` job in `.github/workflows/ci.yml`
+runs only after lint, unit, and integration tests pass, then rsyncs the repo to the
+VPS (same privacy excludes as `scripts/deploy.sh`) and runs
+`docker compose up -d --build` there. It authenticates with a dedicated deploy key
+(`~/.ssh/zeitgeist_deploy` locally; revoke by removing its line from the server's
+`/root/.ssh/authorized_keys`). Required GitHub repo secrets: `DEPLOY_SSH_KEY`
+(the private key file contents) and `DEPLOY_HOST` (the server IP).
+`scripts/deploy.sh` remains for manual/emergency deploys.
