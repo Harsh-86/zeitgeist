@@ -1,0 +1,130 @@
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: zeitgeist-alerts
+    folder: zeitgeist
+    interval: 1m
+    rules:
+      - uid: zeitgeist-freshness
+        title: "Pipeline stalled (freshness)"
+        condition: C
+        data:
+          - refId: A
+            queryType: ""
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              editorMode: code
+              expr: time() - zeitgeist_last_success_timestamp
+              instant: true
+              range: false
+              refId: A
+          - refId: C
+            queryType: ""
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: "__expr__"
+            model:
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [2700]
+                  operator:
+                    type: and
+                  query:
+                    params: ["C"]
+                  reducer:
+                    type: last
+                    params: []
+              refId: C
+        noDataState: Alerting
+        execErrState: Alerting
+        for: 5m
+        annotations:
+          summary: "No successful ingestor run in over 45 minutes — pipeline may be stalled."
+        labels:
+          severity: critical
+
+      - uid: zeitgeist-lag
+        title: "Kafka consumer lag high"
+        condition: C
+        data:
+          - refId: A
+            queryType: ""
+            relativeTimeRange: { from: 900, to: 0 }
+            datasourceUid: prometheus
+            model:
+              editorMode: code
+              expr: max(kafka_consumergroup_lag)
+              instant: true
+              range: false
+              refId: A
+          - refId: C
+            queryType: ""
+            relativeTimeRange: { from: 900, to: 0 }
+            datasourceUid: "__expr__"
+            model:
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [10000]
+                  operator:
+                    type: and
+                  query:
+                    params: ["C"]
+                  reducer:
+                    type: last
+                    params: []
+              refId: C
+        noDataState: OK
+        execErrState: Alerting
+        for: 15m
+        annotations:
+          summary: "A Kafka consumer group is falling behind by more than 10000 messages."
+        labels:
+          severity: warning
+
+      - uid: zeitgeist-target-down
+        title: "Scrape target down"
+        condition: C
+        data:
+          - refId: A
+            queryType: ""
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              editorMode: code
+              expr: min(up)
+              instant: true
+              range: false
+              refId: A
+          - refId: C
+            queryType: ""
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: "__expr__"
+            model:
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    type: lt
+                    params: [1]
+                  operator:
+                    type: and
+                  query:
+                    params: ["C"]
+                  reducer:
+                    type: last
+                    params: []
+              refId: C
+        noDataState: Alerting
+        execErrState: Alerting
+        for: 10m
+        annotations:
+          summary: "At least one Prometheus scrape target is down (min(up) < 1) — a service's /metrics endpoint is unreachable."
+        labels:
+          severity: warning

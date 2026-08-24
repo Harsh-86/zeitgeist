@@ -1,7 +1,9 @@
+import pytest
 from neo4j.exceptions import ServiceUnavailable
 
 from tests.unit.test_models import make_event
 from zeitgeist.extractor.rules import event_to_claims
+from zeitgeist.graph import main as graph_main
 from zeitgeist.graph.main import process_one, write_with_retry
 
 CLAIM = event_to_claims(make_event())[0]
@@ -152,3 +154,98 @@ def test_process_one_writes_and_commits_valid_claim():
 
     assert result is session
     assert consumer.committed == [message]
+
+
+# -- metrics instrumentation ---------------------------------------------------
+
+
+def test_process_one_increments_claims_written_on_success():
+    session = FakeSession("session-0")
+    driver = FakeDriver(lambda name: lambda *a, **k: None)
+    consumer = FakeConsumer()
+    message = FakeMessage(value=CLAIM.to_json(), error=None)
+    before = graph_main.GRAPH_CLAIMS_WRITTEN_TOTAL._value.get()
+
+    process_one(driver, session, consumer, message)
+
+    assert graph_main.GRAPH_CLAIMS_WRITTEN_TOTAL._value.get() == before + 1
+
+
+def test_process_one_does_not_increment_claims_written_for_poison_message():
+    session = FakeSession("session-0")
+    driver = FakeDriver(lambda name: lambda *a, **k: None)
+    consumer = FakeConsumer()
+    message = FakeMessage(value=b"not json at all", error=None)
+    before = graph_main.GRAPH_CLAIMS_WRITTEN_TOTAL._value.get()
+
+    process_one(driver, session, consumer, message)
+
+    assert graph_main.GRAPH_CLAIMS_WRITTEN_TOTAL._value.get() == before
+
+
+def test_write_with_retry_increments_retries_total_on_each_retryable_failure():
+    calls = []
+
+    def run_factory(name):
+        def run(*args, **kwargs):
+            calls.append(name)
+            if len(calls) == 1:
+                raise ServiceUnavailable("neo4j down")
+
+        return run
+
+    driver = FakeDriver(run_factory)
+    old_session = FakeSession("session-0", run=run_factory("session-0"))
+    before = graph_main.GRAPH_RETRIES_TOTAL._value.get()
+
+    write_with_retry(driver, old_session, CLAIM, sleep=lambda s: None)
+
+    assert graph_main.GRAPH_RETRIES_TOTAL._value.get() == before + 1
+
+
+# -- main(): metrics server wiring ---------------------------------------------
+
+
+class _StopLoop(Exception):
+    """Escapes main()'s infinite loop after the first iteration in tests."""
+
+
+class _RaisingConsumer:
+    def poll(self, timeout):
+        raise _StopLoop()
+
+
+class _FakeMainSession:
+    def run(self, *a, **k):
+        return None
+
+    def close(self):
+        pass
+
+
+class _FakeMainDriver:
+    def session(self):
+        return _FakeMainSession()
+
+
+def _run_main_one_iteration(monkeypatch):
+    monkeypatch.setattr(graph_main.GraphDatabase, "driver", lambda *a, **k: _FakeMainDriver())
+    monkeypatch.setattr(graph_main, "make_consumer", lambda *a, **k: _RaisingConsumer())
+    with pytest.raises(_StopLoop):
+        graph_main.main()
+
+
+def test_main_starts_metrics_server_when_port_configured(monkeypatch):
+    monkeypatch.setenv("METRICS_PORT", "9304")
+    calls = []
+    monkeypatch.setattr(graph_main, "start_metrics_server", lambda port: calls.append(port))
+    _run_main_one_iteration(monkeypatch)
+    assert calls == [9304]
+
+
+def test_main_does_not_start_metrics_server_when_port_is_zero(monkeypatch):
+    monkeypatch.delenv("METRICS_PORT", raising=False)
+    calls = []
+    monkeypatch.setattr(graph_main, "start_metrics_server", lambda port: calls.append(port))
+    _run_main_one_iteration(monkeypatch)
+    assert calls == []

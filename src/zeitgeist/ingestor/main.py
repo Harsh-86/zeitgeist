@@ -4,6 +4,7 @@ import json
 import logging
 import time
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx
@@ -18,6 +19,7 @@ from zeitgeist.gdelt.client import (
 )
 from zeitgeist.gdelt.parser import parse_event_row
 from zeitgeist.kafka_utils import make_producer
+from zeitgeist.metrics import get_counter, get_gauge, start_metrics_server
 
 logger = logging.getLogger("zeitgeist.ingestor")
 
@@ -26,6 +28,31 @@ Send = Callable[[str, str, bytes], None]
 # Consecutive-404 thresholds (see run_cycle).
 LATEST_WINDOW_LOG_ESCALATION_ATTEMPTS = 10
 UPSTREAM_GAP_SKIP_ATTEMPTS = 5
+
+WINDOWS_TOTAL = get_counter(
+    "zeitgeist_windows_total", "GDELT windows successfully processed and saved to state"
+)
+EVENTS_PUBLISHED_TOTAL = get_counter(
+    "zeitgeist_events_published_total", "Events published to raw.events"
+)
+ROWS_SKIPPED_TOTAL = get_counter(
+    "zeitgeist_rows_skipped_total", "Malformed GDELT rows skipped during parsing"
+)
+WINDOWS_SKIPPED_UPSTREAM_TOTAL = get_counter(
+    "zeitgeist_windows_skipped_upstream_total",
+    "Windows skipped after repeated 404s from upstream GDELT",
+)
+LAST_SUCCESS_TIMESTAMP = get_gauge(
+    "zeitgeist_last_success_timestamp", "Unix timestamp of the last successful state save"
+)
+
+
+def _mark_freshness() -> None:
+    """Loop-liveness signal: set on any successful state.save, whether the window was
+    fully processed or skip-and-advanced past a persistent upstream gap. Freshness
+    measures the ingest loop making forward progress, not GDELT's delivery record.
+    """
+    LAST_SUCCESS_TIMESTAMP.set(time.time())
 
 
 class DeliveryTracker:
@@ -72,6 +99,31 @@ class IngestorState:
     def save(self, stamp: str) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._path.write_text(json.dumps({"last_stamp": stamp}))
+
+
+def _init_freshness_from_state(state: IngestorState) -> None:
+    """Seed the freshness gauge from persisted state on startup.
+
+    Gauges live in memory and reset to 0 on every process restart, which would make
+    the "no successful window in N minutes" alert fire spuriously right after every
+    deploy — until the next GDELT window lands. Seeding from the last saved stamp
+    avoids that false alarm. Caveat: the stamp is the WINDOW's nominal time, not the
+    wall-clock moment it was actually processed — close enough for a 45-minute alert
+    threshold, and strictly better than leaving the gauge at 0.
+    """
+    stamp = state.last_stamp
+    if stamp is None:
+        return
+    # GDELT stamps are naive UTC timestamps with no timezone component to parse.
+    try:
+        stamp_dt = datetime.strptime(stamp, "%Y%m%d%H%M%S").replace(tzinfo=UTC)
+    except ValueError:
+        # Never-crash rule: a corrupt persisted stamp shouldn't kill boot any
+        # earlier than it otherwise would. Leave the gauge at 0 and carry on;
+        # the next successful cycle will set it correctly.
+        logger.warning("corrupt freshness stamp in state, skipping seed: %r", stamp)
+        return
+    LAST_SUCCESS_TIMESTAMP.set(stamp_dt.timestamp())
 
 
 def run_cycle(
@@ -134,6 +186,8 @@ def run_cycle(
                 "window %s skipped — missing upstream after %d attempts", stamp, attempts
             )
             state.save(stamp)
+            _mark_freshness()
+            WINDOWS_SKIPPED_UPSTREAM_TOTAL.inc()
             misses.pop(stamp, None)
             continue
 
@@ -158,6 +212,10 @@ def run_cycle(
                 break
 
         state.save(stamp)
+        WINDOWS_TOTAL.inc()
+        EVENTS_PUBLISHED_TOTAL.inc(window_published)
+        ROWS_SKIPPED_TOTAL.inc(window_skipped)
+        _mark_freshness()
         misses.pop(stamp, None)
         logger.info(
             "window %s done published=%d skipped=%d", stamp, window_published, window_skipped
@@ -169,8 +227,11 @@ def run_cycle(
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     settings = Settings.from_env()
+    if settings.metrics_port > 0:
+        start_metrics_server(settings.metrics_port)
     client = GdeltClient(httpx.Client(follow_redirects=True))
     state = IngestorState(Path(settings.state_path))
+    _init_freshness_from_state(state)
     producer = make_producer(settings.kafka_bootstrap)
     tracker = DeliveryTracker()
     misses: dict[str, int] = {}

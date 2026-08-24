@@ -10,11 +10,19 @@ from neo4j.exceptions import ServiceUnavailable, SessionExpired, TransientError
 from zeitgeist.config import CLAIMS_TOPIC, Settings
 from zeitgeist.graph.writer import ensure_schema, write_claim
 from zeitgeist.kafka_utils import make_consumer
+from zeitgeist.metrics import get_counter, start_metrics_server
 from zeitgeist.models import Claim
 
 logger = logging.getLogger("zeitgeist.graph")
 
 RETRYABLE = (ServiceUnavailable, SessionExpired, TransientError)
+
+GRAPH_CLAIMS_WRITTEN_TOTAL = get_counter(
+    "zeitgeist_graph_claims_written_total", "Claims successfully written to Neo4j"
+)
+GRAPH_RETRIES_TOTAL = get_counter(
+    "zeitgeist_graph_retries_total", "Retries triggered by transient Neo4j unavailability"
+)
 
 
 def _run_with_retry(driver, session, op: Callable, sleep=time.sleep):
@@ -30,6 +38,7 @@ def _run_with_retry(driver, session, op: Callable, sleep=time.sleep):
             return session
         except RETRYABLE as exc:
             logger.warning("neo4j unavailable (%s); retrying in 2s", exc)
+            GRAPH_RETRIES_TOTAL.inc()
             sleep(2)
             try:
                 session.close()
@@ -63,6 +72,7 @@ def process_one(driver, session, consumer, message):
         consumer.commit(message=message, asynchronous=False)
         return session
     session = write_with_retry(driver, session, claim)
+    GRAPH_CLAIMS_WRITTEN_TOTAL.inc()
     consumer.commit(message=message, asynchronous=False)
     return session
 
@@ -70,6 +80,8 @@ def process_one(driver, session, consumer, message):
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     settings = Settings.from_env()
+    if settings.metrics_port > 0:
+        start_metrics_server(settings.metrics_port)
     driver = GraphDatabase.driver(
         settings.neo4j_uri, auth=(settings.neo4j_user, settings.neo4j_password)
     )

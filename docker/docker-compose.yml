@@ -1,3 +1,11 @@
+x-service-env: &service-env
+  KAFKA_BOOTSTRAP: kafka:9092
+  NEO4J_URI: bolt://neo4j:7687
+  NEO4J_USER: neo4j
+  NEO4J_PASSWORD: ${NEO4J_PASSWORD:-zeitgeist-dev}
+  STATE_PATH: /state/ingestor.json
+  DASHBOARD_PATH: /app/dashboard/index.html
+
 services:
   kafka:
     image: apache/kafka:4.0.0
@@ -14,6 +22,7 @@ services:
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
       KAFKA_LOG_DIRS: /var/lib/kafka/data
+      KAFKA_HEAP_OPTS: ${KAFKA_HEAP_OPTS:--Xms512m -Xmx512m}
     ports:
       - "127.0.0.1:29092:29092"
     healthcheck:
@@ -34,23 +43,29 @@ services:
     command:
       - >
         /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic raw.events --partitions 6 --replication-factor 1 &&
-        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic extracted.claims --partitions 6 --replication-factor 1
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic extracted.claims --partitions 6 --replication-factor 1 &&
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic llm.queue --partitions 6 --replication-factor 1
 
   neo4j:
     image: neo4j:5-community
     environment:
       NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:-zeitgeist-dev}
+      HEALTHCHECK_PASSWORD: ${NEO4J_PASSWORD:-zeitgeist-dev}
+      NEO4J_server_memory_heap_initial__size: ${NEO4J_HEAP:-512m}
+      NEO4J_server_memory_heap_max__size: ${NEO4J_HEAP:-512m}
+      NEO4J_server_memory_pagecache_size: ${NEO4J_PAGECACHE:-512m}
     ports:
       - "127.0.0.1:7474:7474"
       - "127.0.0.1:7687:7687"
     volumes:
       - neo4j-data:/data
     healthcheck:
-      # NOTE: healthcheck env substitution across docker compose versions is unreliable,
-      # so this intentionally keeps the literal default password rather than
-      # $${NEO4J_PASSWORD:-zeitgeist-dev}. If you set a custom NEO4J_PASSWORD, the
-      # healthcheck will report unhealthy even though Neo4j itself is fine.
-      test: ["CMD", "cypher-shell", "-u", "neo4j", "-p", "zeitgeist-dev", "RETURN 1"]
+      # The password is injected into the container env (HEALTHCHECK_PASSWORD below — must NOT start with NEO4J_, the image maps that prefix to db config) and
+      # expanded by the container's shell at check time ($$ escapes compose-level
+      # interpolation). This keeps the healthcheck working with custom passwords —
+      # the literal-password version reported unhealthy on any non-default password,
+      # which silently blocked every service gated on neo4j health (found on VPS deploy).
+      test: ["CMD-SHELL", "cypher-shell -u neo4j -p \"$$HEALTHCHECK_PASSWORD\" 'RETURN 1'"]
       interval: 10s
       timeout: 10s
       retries: 12
@@ -59,13 +74,9 @@ services:
   ingestor:
     build: { context: .., dockerfile: docker/Dockerfile }
     command: ["python", "-m", "zeitgeist.ingestor.main"]
-    environment: &service-env
-      KAFKA_BOOTSTRAP: kafka:9092
-      NEO4J_URI: bolt://neo4j:7687
-      NEO4J_USER: neo4j
-      NEO4J_PASSWORD: ${NEO4J_PASSWORD:-zeitgeist-dev}
-      STATE_PATH: /state/ingestor.json
-      DASHBOARD_PATH: /app/dashboard/index.html
+    environment:
+      <<: *service-env
+      METRICS_PORT: 9101
     volumes:
       - ingestor-state:/state
     depends_on:
@@ -76,7 +87,9 @@ services:
   extractor:
     build: { context: .., dockerfile: docker/Dockerfile }
     command: ["python", "-m", "zeitgeist.extractor.main"]
-    environment: *service-env
+    environment:
+      <<: *service-env
+      METRICS_PORT: 9102
     depends_on:
       kafka-init:
         condition: service_completed_successfully
@@ -85,12 +98,30 @@ services:
   graph-writer:
     build: { context: .., dockerfile: docker/Dockerfile }
     command: ["python", "-m", "zeitgeist.graph.main"]
-    environment: *service-env
+    environment:
+      <<: *service-env
+      METRICS_PORT: 9105
     depends_on:
       kafka-init:
         condition: service_completed_successfully
       neo4j:
         condition: service_healthy
+    restart: unless-stopped
+
+  sampler:
+    build: { context: .., dockerfile: docker/Dockerfile }
+    command: ["python", "-m", "zeitgeist.sampler.main"]
+    environment:
+      <<: *service-env
+      METRICS_PORT: 9103
+      SAMPLER_BUDGET_STATE_PATH: /state/sampler_budget.json
+      SAMPLER_MIN_SCORE: ${SAMPLER_MIN_SCORE:-1.2}
+      LLM_MAX_CALLS_PER_DAY: ${LLM_MAX_CALLS_PER_DAY:-400}
+    volumes:
+      - sampler-state:/state
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
     restart: unless-stopped
 
   api:
@@ -106,7 +137,77 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  llm-extractor:
+    build: { context: .., dockerfile: docker/Dockerfile }
+    command: ["python", "-m", "zeitgeist.llm.main"]
+    environment:
+      <<: *service-env
+      METRICS_PORT: 9104
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      LLM_BUDGET_STATE_PATH: /state/llm_budget.json
+      LLM_MAX_CALLS_PER_DAY: ${LLM_MAX_CALLS_PER_DAY:-400}
+      LLM_MODEL: ${LLM_MODEL:-claude-haiku-4-5}
+    volumes:
+      - llm-state:/state
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  resolver:
+    build: { context: .., dockerfile: docker/Dockerfile }
+    command: ["python", "-m", "zeitgeist.resolver.main"]
+    environment:
+      <<: *service-env
+      METRICS_PORT: 9106
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ER_MAX_CALLS_PER_DAY: ${ER_MAX_CALLS_PER_DAY:-100}
+      ER_BUDGET_STATE_PATH: /state/er_budget.json
+    volumes:
+      - resolver-state:/state
+    depends_on:
+      neo4j:
+        condition: service_healthy
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "127.0.0.1:9090:9090"
+    restart: unless-stopped
+
+  kafka-exporter:
+    image: danielqsj/kafka-exporter:v1.8.0
+    command: ["--kafka.server=kafka:9092"]
+    depends_on:
+      kafka:
+        condition: service_healthy
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.1.0
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-zeitgeist-dev}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/etc/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
 volumes:
   kafka-data:
   neo4j-data:
   ingestor-state:
+  sampler-state:
+  llm-state:
+  resolver-state:
+  prometheus-data:
+  grafana-data:

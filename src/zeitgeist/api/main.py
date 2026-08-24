@@ -7,13 +7,18 @@ import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from zeitgeist.config import CLAIMS_TOPIC, Settings
 from zeitgeist.kafka_utils import make_consumer
+from zeitgeist.metrics import get_gauge, start_metrics_server
 
 logger = logging.getLogger("zeitgeist.api")
+
+GRAPH_ENTITIES = get_gauge("zeitgeist_graph_entities", "Entities currently in the graph")
+GRAPH_EVENTS = get_gauge("zeitgeist_graph_events", "Events currently in the graph")
 
 _DEFAULT_DASHBOARD_INDEX = Path(__file__).resolve().parents[3] / "dashboard" / "index.html"
 
@@ -101,6 +106,18 @@ def create_app(driver=None, start_consumer: bool = False) -> FastAPI:
     def index() -> FileResponse:
         return FileResponse(_dashboard_index())
 
+    @app.get("/metrics")
+    def metrics() -> Response:
+        try:
+            with app.state.driver.session() as session:
+                entities = session.run("MATCH (e:Entity) RETURN count(e) AS n").single()["n"]
+                events = session.run("MATCH (ev:Event) RETURN count(ev) AS n").single()["n"]
+            GRAPH_ENTITIES.set(entities)
+            GRAPH_EVENTS.set(events)
+        except Exception:
+            logger.warning("failed to refresh graph gauges for /metrics", exc_info=True)
+        return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
     @app.websocket("/ws/claims")
     async def ws_claims(ws: WebSocket) -> None:
         await ws.accept()
@@ -118,6 +135,9 @@ def main() -> None:
     import uvicorn
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
+    settings = Settings.from_env()
+    if settings.metrics_port > 0:
+        start_metrics_server(settings.metrics_port)
     uvicorn.run(create_app(start_consumer=True), host="0.0.0.0", port=8000)
 
 

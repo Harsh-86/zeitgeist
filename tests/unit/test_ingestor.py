@@ -1,9 +1,12 @@
 import json
+from datetime import UTC, datetime
 
 import httpx
+import pytest
 
 from tests.unit.test_parser import make_row
 from zeitgeist.gdelt.client import export_url_for, stamp_from_url
+from zeitgeist.ingestor import main as ingestor_main
 from zeitgeist.ingestor.main import DeliveryTracker, IngestorState, run_cycle
 
 
@@ -250,3 +253,157 @@ def test_delivery_tracker_reset_clears_failed_count():
     assert tracker.failed == 1
     tracker.reset()
     assert tracker.failed == 0
+
+
+# -- metrics instrumentation ---------------------------------------------------
+
+
+def test_run_cycle_processed_window_increments_windows_total_and_freshness(tmp_path):
+    """A window whose fetch succeeded: windows_total +1 and freshness gauge set."""
+    state = make_state(tmp_path)
+    client = FakeGdeltClient("20260818143000", {"20260818143000": [make_row()]})
+    before_windows = ingestor_main.WINDOWS_TOTAL._value.get()
+    run_cycle(client, state, lambda t, k, v: None)
+    assert ingestor_main.WINDOWS_TOTAL._value.get() == before_windows + 1
+    assert ingestor_main.LAST_SUCCESS_TIMESTAMP._value.get() > 0
+
+
+def test_run_cycle_increments_published_and_skipped_counters(tmp_path):
+    client = FakeGdeltClient(
+        "20260818143000", {"20260818143000": [make_row(), "malformed\trow"]}
+    )
+    before_published = ingestor_main.EVENTS_PUBLISHED_TOTAL._value.get()
+    before_skipped = ingestor_main.ROWS_SKIPPED_TOTAL._value.get()
+    run_cycle(client, make_state(tmp_path), lambda t, k, v: None)
+    assert ingestor_main.EVENTS_PUBLISHED_TOTAL._value.get() == before_published + 1
+    assert ingestor_main.ROWS_SKIPPED_TOTAL._value.get() == before_skipped + 1
+
+
+def test_run_cycle_skip_and_advance_increments_skipped_upstream_and_freshness_not_windows_total(
+    tmp_path,
+):
+    """Skip-and-advance (missing upstream after 5 attempts) still advances state — so
+    freshness updates (loop liveness) — but is NOT a processed window, so windows_total
+    must stay flat; only windows_skipped_upstream_total counts it. The newest window is
+    also left 404 here (not-yet-published) so nothing else in this cycle can touch
+    windows_total, isolating the skip-and-advance path's effect.
+    """
+    state = make_state(tmp_path)
+    state.save("20260818140000")
+    stamps = ["20260818141500", "20260818143000"]
+    fetch_map = {"20260818141500": "404", "20260818143000": "404"}
+    client = FakeGdeltClient(stamps[-1], fetch_map)
+    misses = {"20260818141500": 4}  # this attempt makes it the 5th: skip-and-advance
+    before_skipped_upstream = ingestor_main.WINDOWS_SKIPPED_UPSTREAM_TOTAL._value.get()
+    before_windows = ingestor_main.WINDOWS_TOTAL._value.get()
+    run_cycle(client, state, lambda t, k, v: None, misses=misses)
+    assert ingestor_main.WINDOWS_SKIPPED_UPSTREAM_TOTAL._value.get() == (
+        before_skipped_upstream + 1
+    )
+    assert ingestor_main.WINDOWS_TOTAL._value.get() == before_windows
+    assert ingestor_main.LAST_SUCCESS_TIMESTAMP._value.get() > 0
+    assert state.last_stamp == "20260818141500"  # skip-and-advance saved this stamp
+
+
+def test_run_cycle_undelivered_flush_does_not_increment_any_durable_metric(tmp_path):
+    """Mirrors test_run_cycle_does_not_save_state_on_undelivered_messages: when flush()
+    reports undelivered > 0, state is not saved and the cycle retries next time — so
+    none of the durable, save-gated metrics (windows_total, events_published_total,
+    rows_skipped_total, freshness) may move. Without this, published/skipped would be
+    double-counted on the eventual successful retry of the same window.
+    """
+    state = make_state(tmp_path)
+    client = FakeGdeltClient(
+        "20260818143000", {"20260818143000": [make_row(), "malformed\trow"]}
+    )
+    before_windows = ingestor_main.WINDOWS_TOTAL._value.get()
+    before_published = ingestor_main.EVENTS_PUBLISHED_TOTAL._value.get()
+    before_skipped = ingestor_main.ROWS_SKIPPED_TOTAL._value.get()
+    before_freshness = ingestor_main.LAST_SUCCESS_TIMESTAMP._value.get()
+
+    published, skipped = run_cycle(client, state, lambda t, k, v: None, flush=lambda: 5)
+
+    assert published == 1  # messages were sent even though undelivered
+    assert skipped == 1
+    assert state.last_stamp is None
+    assert ingestor_main.WINDOWS_TOTAL._value.get() == before_windows
+    assert ingestor_main.EVENTS_PUBLISHED_TOTAL._value.get() == before_published
+    assert ingestor_main.ROWS_SKIPPED_TOTAL._value.get() == before_skipped
+    assert ingestor_main.LAST_SUCCESS_TIMESTAMP._value.get() == before_freshness
+
+
+def test_run_cycle_does_not_increment_windows_total_when_no_state_change(tmp_path):
+    state = make_state(tmp_path)
+    client = FakeGdeltClient("20260818143000", {"20260818143000": "404"})
+    before_windows = ingestor_main.WINDOWS_TOTAL._value.get()
+    run_cycle(client, state, lambda t, k, v: None)
+    assert ingestor_main.WINDOWS_TOTAL._value.get() == before_windows
+
+
+# -- freshness gauge startup seeding -------------------------------------------
+
+
+def test_init_freshness_from_state_sets_gauge_to_stamp_epoch(tmp_path):
+    """Gauges are in-memory and reset to 0 on restart. Seed from the last saved stamp
+    so the freshness alert doesn't fire spuriously right after every deploy.
+    """
+    state = make_state(tmp_path)
+    state.save("20260818143000")
+    ingestor_main._init_freshness_from_state(state)
+    expected = datetime(2026, 8, 18, 14, 30, 0, tzinfo=UTC).timestamp()
+    assert ingestor_main.LAST_SUCCESS_TIMESTAMP._value.get() == expected
+
+
+def test_init_freshness_from_state_leaves_gauge_untouched_when_no_state(tmp_path):
+    state = make_state(tmp_path)
+    before = ingestor_main.LAST_SUCCESS_TIMESTAMP._value.get()
+    ingestor_main._init_freshness_from_state(state)
+    assert ingestor_main.LAST_SUCCESS_TIMESTAMP._value.get() == before
+
+
+def test_init_freshness_from_state_survives_garbage_stamp(tmp_path, caplog):
+    """A corrupt persisted stamp must never crash boot (never-crash rule) -
+    log a warning and leave the gauge untouched instead.
+    """
+    state = make_state(tmp_path)
+    state.save("not-a-valid-stamp")
+    before = ingestor_main.LAST_SUCCESS_TIMESTAMP._value.get()
+    with caplog.at_level("WARNING"):
+        ingestor_main._init_freshness_from_state(state)
+    assert ingestor_main.LAST_SUCCESS_TIMESTAMP._value.get() == before
+    assert "corrupt freshness stamp" in caplog.text
+
+
+# -- main(): metrics server wiring ---------------------------------------------
+
+
+class _StopLoop(Exception):
+    """Escapes main()'s infinite loop after the first iteration in tests."""
+
+
+def _run_main_one_iteration(monkeypatch, tmp_path):
+    monkeypatch.setenv("STATE_PATH", str(tmp_path / "state.json"))
+    monkeypatch.setattr(ingestor_main, "make_producer", lambda bootstrap: object())
+    monkeypatch.setattr(ingestor_main, "GdeltClient", lambda http_client: object())
+    monkeypatch.setattr(ingestor_main, "run_cycle", lambda *a, **k: (0, 0))
+    monkeypatch.setattr(
+        ingestor_main.time, "sleep", lambda seconds: (_ for _ in ()).throw(_StopLoop())
+    )
+    with pytest.raises(_StopLoop):
+        ingestor_main.main()
+
+
+def test_main_starts_metrics_server_when_port_configured(monkeypatch, tmp_path):
+    monkeypatch.setenv("METRICS_PORT", "9200")
+    calls = []
+    monkeypatch.setattr(ingestor_main, "start_metrics_server", lambda port: calls.append(port))
+    _run_main_one_iteration(monkeypatch, tmp_path)
+    assert calls == [9200]
+
+
+def test_main_does_not_start_metrics_server_when_port_is_zero(monkeypatch, tmp_path):
+    monkeypatch.delenv("METRICS_PORT", raising=False)
+    calls = []
+    monkeypatch.setattr(ingestor_main, "start_metrics_server", lambda port: calls.append(port))
+    _run_main_one_iteration(monkeypatch, tmp_path)
+    assert calls == []
