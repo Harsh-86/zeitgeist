@@ -5,6 +5,7 @@ keep the LLM tier's daily spend predictable regardless of news volume.
 """
 
 import logging
+from datetime import datetime
 from pathlib import Path
 
 from zeitgeist.budget import DailyBudget
@@ -99,7 +100,9 @@ def main() -> None:
     batcher = Batcher(producer, consumer)
     recent = RecentKeys()
     budget = DailyBudget(
-        Path(settings.sampler_budget_state_path), settings.llm_max_calls_per_day
+        Path(settings.sampler_budget_state_path),
+        settings.llm_max_calls_per_day,
+        now=datetime.now,
     )
     batch_counts: dict[str, int] = dict.fromkeys(_BATCH_COUNTER_BY_DISPOSITION, 0)
     logger.info("sampler consuming %s", RAW_TOPIC)

@@ -2,13 +2,14 @@
 same-entity candidate pairs, writing ALIAS_OF / ER_JUDGED edges into the graph.
 
 Canonical processing order per cycle (see run_cycle):
-  1. Generic screening: every never-screened entity is spent-budget-gated,
+  1. Pair judging: candidate same-entity pairs (minus pairs already judged)
+     are spent-budget-gated, judged, and always recorded; a SAME verdict at
+     or above cfg.er_min_confidence additionally writes an ALIAS_OF edge.
+     Judging runs first so a large screening backlog can never starve it.
+  2. Generic screening: every never-screened entity is spent-budget-gated,
      screened by the judge, then marked (unless the judge's response failed
      to parse, in which case it is retried next cycle -- the budget spend is
      never refunded).
-  2. Pair judging: candidate same-entity pairs (minus pairs already judged)
-     are spent-budget-gated, judged, and always recorded; a SAME verdict at
-     or above cfg.er_min_confidence additionally writes an ALIAS_OF edge.
   3. The cycle stops instantly the moment the budget is exhausted -- no
      further reads or judge calls are made for the remainder of the cycle.
 """
@@ -16,6 +17,7 @@ Canonical processing order per cycle (see run_cycle):
 import logging
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 import anthropic
@@ -47,8 +49,10 @@ RESOLVER_ALIASED_TOTAL = get_counter(
 
 
 def run_cycle(session, judge: ErJudge, budget: DailyBudget, cfg) -> dict:
-    """Run one resolver cycle: screen unscreened entities, then judge
-    candidate pairs, stopping instantly once the daily budget is exhausted.
+    """Run one resolver cycle: judge candidate pairs first, then screen
+    unscreened entities with whatever budget remains, stopping instantly once
+    the daily budget is exhausted. Judging first is safe because the pair
+    universe is already restricted to screened non-generic unaliased entities.
 
     Returns a counters dict: screened/generic/judged/aliased/skipped/budget_left.
     """
@@ -59,62 +63,62 @@ def run_cycle(session, judge: ErJudge, budget: DailyBudget, cfg) -> dict:
     skipped = 0
     budget_exhausted = False
 
-    unscreened = graph.fetch_unscreened_entities(session, min_events=cfg.er_min_events)
-    for name, _count in unscreened:
+    entities = graph.fetch_entities(session, min_events=cfg.er_min_events)
+    already_judged = graph.fetch_judged_pairs(session)
+    pairs = candidates.candidate_pairs(entities)
+
+    for pair in pairs:
+        if frozenset((pair[0], pair[1])) in already_judged:
+            continue
+
         if not budget.try_spend():
             budget_exhausted = True
             break
 
-        relations = graph.fetch_sample_relations(session, name, limit=_SAMPLE_RELATIONS_LIMIT)
-        verdict, _usage = judge.screen_generic(name, relations)
+        a_relations = graph.fetch_sample_relations(
+            session, pair[0], limit=_SAMPLE_RELATIONS_LIMIT
+        )
+        b_relations = graph.fetch_sample_relations(
+            session, pair[1], limit=_SAMPLE_RELATIONS_LIMIT
+        )
+        verdict, _usage = judge.judge_pair(pair[0], pair[1], a_relations, b_relations)
         if verdict is None:
             skipped += 1
             continue
 
-        graph.mark_generic(session, name, verdict.generic, verdict.confidence)
-        screened += 1
-        if verdict.generic:
-            generic += 1
+        graph.record_judgment(
+            session,
+            a=pair[0],
+            b=pair[1],
+            verdict=verdict.verdict,
+            confidence=verdict.confidence,
+        )
+        judged += 1
+
+        if (
+            verdict.verdict == "SAME"
+            and verdict.confidence >= cfg.er_min_confidence
+            and graph.write_alias(session, alias_name=pair[0], canonical_name=pair[1])
+        ):
+            aliased += 1
 
     if not budget_exhausted:
-        entities = graph.fetch_entities(session, min_events=cfg.er_min_events)
-        already_judged = graph.fetch_judged_pairs(session)
-        pairs = candidates.candidate_pairs(entities)
-
-        for pair in pairs:
-            if frozenset((pair[0], pair[1])) in already_judged:
-                continue
-
+        unscreened = graph.fetch_unscreened_entities(session, min_events=cfg.er_min_events)
+        for name, _count in unscreened:
             if not budget.try_spend():
                 budget_exhausted = True
                 break
 
-            a_relations = graph.fetch_sample_relations(
-                session, pair[0], limit=_SAMPLE_RELATIONS_LIMIT
-            )
-            b_relations = graph.fetch_sample_relations(
-                session, pair[1], limit=_SAMPLE_RELATIONS_LIMIT
-            )
-            verdict, _usage = judge.judge_pair(pair[0], pair[1], a_relations, b_relations)
+            relations = graph.fetch_sample_relations(session, name, limit=_SAMPLE_RELATIONS_LIMIT)
+            verdict, _usage = judge.screen_generic(name, relations)
             if verdict is None:
                 skipped += 1
                 continue
 
-            graph.record_judgment(
-                session,
-                a=pair[0],
-                b=pair[1],
-                verdict=verdict.verdict,
-                confidence=verdict.confidence,
-            )
-            judged += 1
-
-            if (
-                verdict.verdict == "SAME"
-                and verdict.confidence >= cfg.er_min_confidence
-                and graph.write_alias(session, alias_name=pair[0], canonical_name=pair[1])
-            ):
-                aliased += 1
+            graph.mark_generic(session, name, verdict.generic, verdict.confidence)
+            screened += 1
+            if verdict.generic:
+                generic += 1
 
     counters = {
         "screened": screened,
@@ -181,7 +185,9 @@ def main() -> None:
     session = driver.session()
     session = _run_with_retry(driver, session, graph.ensure_schema)
 
-    budget = DailyBudget(Path(settings.er_budget_state_path), settings.er_max_calls_per_day)
+    budget = DailyBudget(
+        Path(settings.er_budget_state_path), settings.er_max_calls_per_day, now=datetime.now
+    )
 
     logger.info("resolver starting (interval=%ds)", settings.resolver_interval_seconds)
     while True:
