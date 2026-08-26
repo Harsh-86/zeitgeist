@@ -350,7 +350,9 @@ def test_pair_judging_same_verdict_above_threshold_but_alias_guard_hit_leaves_al
 # ---- budget stops the cycle ----------------------------------------------
 
 
-def test_budget_exhausted_before_first_entity_stops_instantly_and_skips_pairing():
+def test_budget_exhausted_before_first_entity_stops_instantly():
+    # No candidate pairs, so judging (which runs first) spends nothing; the
+    # first screening entity is then denied and the cycle stops instantly.
     session = FakeSession(
         canned={
             resolver_graph.FETCH_UNSCREENED_ENTITIES_CYPHER: [
@@ -366,14 +368,6 @@ def test_budget_exhausted_before_first_entity_stops_instantly_and_skips_pairing(
     assert counters == {**EMPTY_COUNTERS, "budget_left": False}
     assert budget.calls == 1
     assert judge.screen_calls == []
-    fetch_entities_calls = [
-        q for q in session.queries if q[0] == resolver_graph.FETCH_ENTITIES_CYPHER
-    ]
-    assert fetch_entities_calls == []
-    fetch_judged_calls = [
-        q for q in session.queries if q[0] == resolver_graph.FETCH_JUDGED_PAIRS_CYPHER
-    ]
-    assert fetch_judged_calls == []
 
 
 def test_budget_exhausted_mid_screening_stops_before_second_entity():
@@ -391,10 +385,6 @@ def test_budget_exhausted_mid_screening_stops_before_second_entity():
 
     assert counters == {**EMPTY_COUNTERS, "screened": 1, "budget_left": False}
     assert [c[0] for c in judge.screen_calls] == ["A"]
-    fetch_entities_calls = [
-        q for q in session.queries if q[0] == resolver_graph.FETCH_ENTITIES_CYPHER
-    ]
-    assert fetch_entities_calls == []
 
 
 def test_budget_exhausted_during_pairing_stops_further_pairs():
@@ -426,6 +416,85 @@ def test_budget_exhausted_during_pairing_stops_further_pairs():
     assert len(judge.pair_calls) == 1
     assert judge.pair_calls[0][0] == "ECB"
     assert judge.pair_calls[0][1] == "EUROPEAN CENTRAL BANK"
+
+
+# ---- judge-first ordering --------------------------------------------------
+
+
+class OrderTrackingJudge(FakeJudge):
+    """FakeJudge that also records the interleaved order of judge calls."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.call_order: list[str] = []
+
+    def screen_generic(self, name, sample_relations):
+        self.call_order.append("screen")
+        return super().screen_generic(name, sample_relations)
+
+    def judge_pair(self, a, b, a_relations, b_relations):
+        self.call_order.append("judge")
+        return super().judge_pair(a, b, a_relations, b_relations)
+
+
+def test_pair_judging_happens_before_screening():
+    session = FakeSession(
+        canned={
+            resolver_graph.FETCH_UNSCREENED_ENTITIES_CYPHER: [
+                FakeResult([{"name": "POLICE", "count": 5}])
+            ],
+            resolver_graph.FETCH_ENTITIES_CYPHER: ECB_PAIR_ENTITIES,
+        }
+    )
+    judge = OrderTrackingJudge(
+        generic_verdicts={"POLICE": (GenericVerdict(generic=True, confidence=0.9), {})},
+        pair_verdicts={
+            ("ECB", "EUROPEAN CENTRAL BANK"): (PairVerdict(verdict="DIFFERENT", confidence=0.9), {})
+        },
+    )
+    budget = AlwaysAvailable()
+
+    counters = run_cycle(session, judge, budget, make_cfg())
+
+    assert judge.call_order == ["judge", "screen"]
+    cyphers = [q[0] for q in session.queries]
+    assert cyphers.index(resolver_graph.FETCH_ENTITIES_CYPHER) < cyphers.index(
+        resolver_graph.FETCH_UNSCREENED_ENTITIES_CYPHER
+    )
+    assert counters == {**EMPTY_COUNTERS, "screened": 1, "generic": 1, "judged": 1}
+
+
+def test_budget_exhausted_during_judging_skips_screening_entirely():
+    session = FakeSession(canned={resolver_graph.FETCH_ENTITIES_CYPHER: ECB_PAIR_ENTITIES})
+    judge = FakeJudge()
+    budget = NeverAvailable()
+
+    counters = run_cycle(session, judge, budget, make_cfg())
+
+    assert counters == {**EMPTY_COUNTERS, "budget_left": False}
+    assert budget.calls == 1
+    assert judge.screen_calls == []
+    unscreened_calls = [
+        q for q in session.queries if q[0] == resolver_graph.FETCH_UNSCREENED_ENTITIES_CYPHER
+    ]
+    assert unscreened_calls == []
+
+
+def test_counters_dict_keys_unchanged():
+    session = FakeSession()
+    judge = FakeJudge()
+    budget = AlwaysAvailable()
+
+    counters = run_cycle(session, judge, budget, make_cfg())
+
+    assert set(counters.keys()) == {
+        "screened",
+        "generic",
+        "judged",
+        "aliased",
+        "skipped",
+        "budget_left",
+    }
 
 
 # ---- counters accurate across a combined cycle ---------------------------
