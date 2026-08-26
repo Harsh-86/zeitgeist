@@ -239,3 +239,28 @@ def test_paced_state_file_format_unchanged(tmp_path):
 
     data = json.loads(path.read_text())
     assert set(data.keys()) == {"date", "count"}
+
+
+def test_try_spend_is_thread_safe_under_concurrency(tmp_path):
+    # /ask calls try_spend from threadpool threads; the check-then-increment
+    # must never let concurrent callers race past the cap.
+    import threading
+
+    path = tmp_path / "budget.json"
+    budget = DailyBudget(path, limit=10)
+    granted = []
+
+    def worker():
+        for _ in range(5):
+            if budget.try_spend():
+                granted.append(1)
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert len(granted) == 10
+    data = json.loads(path.read_text())
+    assert data["count"] == 10

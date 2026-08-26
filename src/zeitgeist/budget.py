@@ -5,6 +5,7 @@ import logging
 import math
 import os
 import tempfile
+import threading
 from collections.abc import Callable
 from datetime import date, datetime
 from pathlib import Path
@@ -45,6 +46,9 @@ class DailyBudget:
     ) -> None:
         self._path = Path(path)
         self._limit = limit
+        # try_spend is check-then-increment; concurrent callers (the /ask
+        # endpoint runs in a threadpool) must not race past the cap.
+        self._lock = threading.Lock()
         self._today = today
         self._now = now
         self._exhausted_count = 0
@@ -100,8 +104,13 @@ class DailyBudget:
         """Increment and return True while under today's limit; False once exhausted.
 
         With pacing enabled (`now` provided), also returns False while today's
-        spend has caught up with the clock-proportional allowance.
+        spend has caught up with the clock-proportional allowance. Thread-safe:
+        the whole check-then-increment-then-save runs under a lock.
         """
+        with self._lock:
+            return self._try_spend_locked()
+
+    def _try_spend_locked(self) -> bool:
         now = self._now() if self._now is not None else None
         today_str = now.date().isoformat() if now is not None else self._today().isoformat()
         if today_str != self._date:

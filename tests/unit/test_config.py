@@ -96,6 +96,25 @@ def test_resolver_env_overrides(monkeypatch):
     assert settings.er_min_events == 5
 
 
+def test_ask_defaults(monkeypatch):
+    for var in ("ASK_TOKEN", "ASK_MAX_CALLS_PER_DAY", "ASK_BUDGET_STATE_PATH"):
+        monkeypatch.delenv(var, raising=False)
+    settings = Settings.from_env()
+    assert settings.ask_token == ""
+    assert settings.ask_max_calls_per_day == 50
+    assert settings.ask_budget_state_path == "state/ask_budget.json"
+
+
+def test_ask_env_overrides(monkeypatch):
+    monkeypatch.setenv("ASK_TOKEN", "sekrit")
+    monkeypatch.setenv("ASK_MAX_CALLS_PER_DAY", "10")
+    monkeypatch.setenv("ASK_BUDGET_STATE_PATH", "state/custom_ask_budget.json")
+    settings = Settings.from_env()
+    assert settings.ask_token == "sekrit"
+    assert settings.ask_max_calls_per_day == 10
+    assert settings.ask_budget_state_path == "state/custom_ask_budget.json"
+
+
 def test_metrics_port_default(monkeypatch):
     monkeypatch.delenv("METRICS_PORT", raising=False)
     settings = Settings.from_env()

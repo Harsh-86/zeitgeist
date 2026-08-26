@@ -3,22 +3,40 @@
 import asyncio
 import logging
 import os
+import secrets
 import threading
 from contextlib import asynccontextmanager
+from datetime import datetime
 from pathlib import Path
 
-from fastapi import FastAPI, Response, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, Request, Response, WebSocket, WebSocketDisconnect
+from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import FileResponse, JSONResponse
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
+from zeitgeist.agent.query import validate_cypher
+from zeitgeist.budget import DailyBudget
 from zeitgeist.config import CLAIMS_TOPIC, Settings
 from zeitgeist.kafka_utils import make_consumer
-from zeitgeist.metrics import get_gauge, start_metrics_server
+from zeitgeist.metrics import get_counter, get_gauge, start_metrics_server
 
 logger = logging.getLogger("zeitgeist.api")
 
 GRAPH_ENTITIES = get_gauge("zeitgeist_graph_entities", "Entities currently in the graph")
 GRAPH_EVENTS = get_gauge("zeitgeist_graph_events", "Events currently in the graph")
+
+ASK_QUESTIONS = get_counter(
+    "zeitgeist_ask_questions_total", "Authorized /ask questions attempted"
+)
+ASK_DENIED = get_counter(
+    "zeitgeist_ask_denied_total", "/ask attempts denied by the daily budget"
+)
+ASK_FAILED = get_counter(
+    "zeitgeist_ask_failed_total", "/ask attempts that ended in an error body"
+)
+
+_MAX_QUESTION_CHARS = 500
+_MAX_BODY_BYTES = 10_000
 
 RECENT_CLAIMS_QUERY = (
     "MATCH (s:Entity)-[:ACTOR1_IN]->(ev:Event)-[:ACTOR2]->(o:Entity) "
@@ -39,6 +57,32 @@ def _dashboard_index() -> Path:
     """
     override = os.getenv("DASHBOARD_PATH")
     return Path(override) if override else _DEFAULT_DASHBOARD_INDEX
+
+
+def _ask_error(message: str) -> dict:
+    """The /ask error body: every field present, error set — the shape never varies."""
+    return {
+        "answer": None,
+        "cypher": None,
+        "citations": [],
+        "records_count": 0,
+        "error": message,
+    }
+
+
+def _citations(records: list[dict]) -> list[str]:
+    """Deduped, order-preserving truthy source_url values found in the records.
+
+    Matches the bare key and dotted projections like "ev.source_url" (an
+    unaliased RETURN ev.source_url), so citations survive either spelling.
+    """
+    urls: list[str] = []
+    for record in records:
+        for key, value in record.items():
+            is_citation = key == "source_url" or key.endswith(".source_url")
+            if is_citation and value and value not in urls:
+                urls.append(value)
+    return urls
 
 
 class Broadcaster:
@@ -72,16 +116,33 @@ def _consume_forever(broadcaster: Broadcaster, loop: asyncio.AbstractEventLoop) 
         asyncio.run_coroutine_threadsafe(broadcaster.broadcast(text), loop)
 
 
-def create_app(driver=None, start_consumer: bool = False) -> FastAPI:
+def create_app(
+    driver=None, start_consumer: bool = False, agent=None, ask_budget=None
+) -> FastAPI:
     broadcaster = Broadcaster()
+    settings = Settings.from_env()
 
     if driver is None:
         from neo4j import GraphDatabase
 
-        settings = Settings.from_env()
         driver = GraphDatabase.driver(
             settings.neo4j_uri, auth=(settings.neo4j_user, settings.neo4j_password)
         )
+
+    if agent is None and settings.anthropic_api_key:
+        import anthropic
+
+        from zeitgeist.agent.query import QueryAgent
+
+        agent = QueryAgent(
+            anthropic.Anthropic(api_key=settings.anthropic_api_key), settings.llm_model
+        )
+        if ask_budget is None:
+            ask_budget = DailyBudget(
+                Path(settings.ask_budget_state_path),
+                settings.ask_max_calls_per_day,
+                now=datetime.now,
+            )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -122,6 +183,95 @@ def create_app(driver=None, start_consumer: bool = False) -> FastAPI:
             logger.warning("failed to fetch recent claims for /recent", exc_info=True)
             return {"claims": []}
         return {"claims": claims}
+
+    def _run_cypher(cypher: str) -> list[dict]:
+        with app.state.driver.session() as session:
+            return session.execute_read(lambda tx: [dict(r) for r in tx.run(cypher)])
+
+    def _spend_allowed() -> bool:
+        return ask_budget is None or ask_budget.try_spend()
+
+    def _answer_question(question: str) -> dict:
+        if agent is None:
+            return _ask_error("ask agent not configured")
+
+        if not _spend_allowed():
+            ASK_DENIED.inc()
+            return _ask_error("daily ask budget exhausted")
+        raw, _usage = agent.generate_cypher(question)
+        cypher = validate_cypher(raw) if raw is not None else None
+        if cypher is None:
+            return _ask_error("could not generate a safe query")
+
+        try:
+            records = _run_cypher(cypher)
+        except Exception as exc:
+            logger.warning("/ask cypher failed, retrying once (cypher=%s)", cypher, exc_info=True)
+            if not _spend_allowed():
+                ASK_DENIED.inc()
+                return _ask_error("daily ask budget exhausted")
+            raw, _usage = agent.generate_cypher(question, error_feedback=f"{cypher}\n{exc}")
+            cypher = validate_cypher(raw) if raw is not None else None
+            if cypher is None:
+                return _ask_error("could not generate a safe query")
+            try:
+                records = _run_cypher(cypher)
+            except Exception:
+                logger.warning("/ask cypher retry failed (cypher=%s)", cypher, exc_info=True)
+                return _ask_error("query execution failed")
+
+        if not _spend_allowed():
+            ASK_DENIED.inc()
+            return _ask_error("daily ask budget exhausted")
+        answer, _usage = agent.synthesize(question, records)
+        if answer is None:
+            return _ask_error("could not synthesize an answer")
+
+        return {
+            "answer": answer,
+            "cypher": cypher,
+            "citations": _citations(records),
+            "records_count": len(records),
+            "error": None,
+        }
+
+    def _ask_flow(question: str) -> dict:
+        try:
+            return _answer_question(question)
+        except Exception:
+            logger.warning("unexpected failure answering /ask", exc_info=True)
+            return _ask_error("internal error")
+
+    @app.post("/ask")
+    async def ask(request: Request) -> JSONResponse:
+        if not settings.ask_token:
+            return JSONResponse({"error": "ask endpoint disabled"}, status_code=403)
+        provided = request.headers.get("X-Ask-Token", "")
+        # Compare as bytes: compare_digest raises TypeError on non-ASCII str
+        # input, and the header value is attacker-controlled.
+        if not secrets.compare_digest(provided.encode(), settings.ask_token.encode()):
+            return JSONResponse({"error": "invalid token"}, status_code=403)
+
+        if int(request.headers.get("content-length") or 0) > _MAX_BODY_BYTES:
+            return JSONResponse({"error": "request body too large"}, status_code=400)
+        try:
+            body = await request.json()
+        except ValueError:
+            body = None
+        question = body.get("question") if isinstance(body, dict) else None
+        if not isinstance(question, str) or not question.strip():
+            return JSONResponse({"error": "question is required"}, status_code=400)
+        if len(question) > _MAX_QUESTION_CHARS:
+            return JSONResponse(
+                {"error": f"question too long (max {_MAX_QUESTION_CHARS} characters)"},
+                status_code=400,
+            )
+
+        ASK_QUESTIONS.inc()
+        result = await run_in_threadpool(_ask_flow, question)
+        if result["error"] is not None:
+            ASK_FAILED.inc()
+        return JSONResponse(result)
 
     @app.get("/")
     def index() -> FileResponse:

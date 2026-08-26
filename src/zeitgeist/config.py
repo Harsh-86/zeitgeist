@@ -28,6 +28,9 @@ class Settings:
     er_min_confidence: float
     er_min_events: int
     metrics_port: int
+    ask_token: str
+    ask_max_calls_per_day: int
+    ask_budget_state_path: str
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -54,4 +57,7 @@ class Settings:
             er_min_confidence=float(os.getenv("ER_MIN_CONFIDENCE", "0.8")),
             er_min_events=int(os.getenv("ER_MIN_EVENTS", "3")),
             metrics_port=int(os.getenv("METRICS_PORT", "0")),
+            ask_token=os.getenv("ASK_TOKEN", ""),
+            ask_max_calls_per_day=int(os.getenv("ASK_MAX_CALLS_PER_DAY", "50")),
+            ask_budget_state_path=os.getenv("ASK_BUDGET_STATE_PATH", "state/ask_budget.json"),
         )
