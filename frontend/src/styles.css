@@ -244,7 +244,7 @@ h2 {
 .ticker-track {
   display: flex;
   width: max-content;
-  animation: wire 60s linear infinite;
+  animation: wire 120s linear infinite;
 }
 
 .ticker-run {
