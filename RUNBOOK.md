@@ -81,6 +81,62 @@ API key.
   llm-extractor` should show `llm call: in=... out=... cached=...` lines, and
   `MATCH (ev:Event {tier:'llm'}) RETURN count(ev)` in cypher-shell should grow.
 
+## Ask agent (/ask)
+
+`POST /ask` answers natural-language questions about the graph: the query
+agent generates read-only Cypher (validated, executed via `execute_read`),
+retries once on a Neo4j error, and synthesizes a cited answer from the
+returned records. It is **private** — token-gated, not linked from the site —
+until Phase 4 evals prove answer quality.
+
+**Enable** (it ships disabled — no token = 403 for everyone):
+
+1. On the server, generate a token and add it to `/root/zeitgeist/docker/.env`
+   (never the repo):
+
+   ```
+   openssl rand -hex 24            # -> ASK_TOKEN=<value>
+   ```
+
+   Optional knob in the same file: `ASK_MAX_CALLS_PER_DAY` (default 50; a
+   question costs ~2 LLM calls, 3 with a retry — so ~25 questions/day).
+2. Recreate the api container:
+   `cd /root/zeitgeist && docker compose -f docker/docker-compose.yml up -d api`
+
+**Ask**:
+
+```
+curl -s -X POST https://zeitgeistnews.com/ask \
+  -H "X-Ask-Token: $ASK_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"question": "What happened around GERMANY today?"}'
+```
+
+Responses always carry `{answer, cypher, citations, records_count, error}`;
+failures return an `error` string in that body, never a 5xx. The budget is
+paced across the day (same mechanism as the sampler/resolver wallets, state in
+the `api-state` volume); when exhausted the body says so and no LLM call is
+made. Metrics: `zeitgeist_ask_questions_total`, `zeitgeist_ask_denied_total`,
+`zeitgeist_ask_failed_total` on the api's `/metrics`.
+
+**Disable**: remove `ASK_TOKEN` from the env file and recreate the api
+container — the endpoint reverts to 403 for all callers.
+
+## MCP server
+
+`src/zeitgeist/mcp_server.py` exposes the graph as six read-only MCP tools
+(entity search, timelines, connections, recent events, stats, and a
+validated raw-Cypher power tool) over stdio — the consuming LLM does the
+reasoning, no API key is involved, and writes are rejected twice over
+(keyword validator + `execute_read`).
+
+- **Local**: `make up`, then `uv run python -m zeitgeist.mcp_server`
+  (defaults target `bolt://localhost:7687` / `zeitgeist-dev`).
+- **Against production**: tunnel bolt first —
+  `ssh -L 7687:127.0.0.1:7687 root@<server>` — then run the server locally
+  with `NEO4J_PASSWORD=<the real one>`.
+- Claude Desktop / Claude Code config snippets live in the README's
+  "Plug the news into Claude (MCP)" section.
+
 ## Entity resolution (ER / resolver)
 
 The `resolver` service periodically (every `RESOLVER_INTERVAL_SECONDS`,

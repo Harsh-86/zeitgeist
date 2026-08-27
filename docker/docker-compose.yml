@@ -127,7 +127,17 @@ services:
   api:
     build: { context: .., dockerfile: docker/Dockerfile }
     command: ["python", "-m", "zeitgeist.api.main"]
-    environment: *service-env
+    environment:
+      <<: *service-env
+      # /ask stays disabled unless the env file provides ASK_TOKEN (403 without
+      # it) and ANTHROPIC_API_KEY (agent not built without it) — safe defaults.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-claude-haiku-4-5}
+      ASK_TOKEN: ${ASK_TOKEN:-}
+      ASK_MAX_CALLS_PER_DAY: ${ASK_MAX_CALLS_PER_DAY:-50}
+      ASK_BUDGET_STATE_PATH: /state/ask_budget.json
+    volumes:
+      - api-state:/state
     ports:
       # Loopback-only since Caddy fronts the public HTTPS door; direct :8000 stays
       # available on the server itself for health checks and SSH-tunnel access.
@@ -222,6 +232,7 @@ services:
 volumes:
   kafka-data:
   neo4j-data:
+  api-state:
   ingestor-state:
   sampler-state:
   llm-state:
