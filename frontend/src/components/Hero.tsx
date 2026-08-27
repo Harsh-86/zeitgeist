@@ -61,7 +61,7 @@ export default function Hero() {
 
   return (
     <section className="hero">
-      <LiveGraph className="hero-graph" />
+      <LiveGraph className="hero-graph" ambient />
       <div className="hero-overlay">
         <h1 className="hero-title">zeitgeist</h1>
         <p className="hero-headline">Watch the world&apos;s news become a knowledge graph — live</p>

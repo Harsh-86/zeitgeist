@@ -50,6 +50,8 @@ h2 {
 .hero-graph {
   position: absolute;
   inset: 0;
+  /* Ambient backdrop: dimmed so the headline reads over it. */
+  opacity: 0.55;
 }
 
 .hero-overlay {
@@ -61,7 +63,7 @@ h2 {
   justify-content: center;
   text-align: center;
   padding: 0 16px;
-  pointer-events: none; /* the graph behind stays interactive */
+  pointer-events: none; /* overlay text never blocks the page */
   text-shadow:
     0 0 8px var(--bg),
     0 0 24px var(--bg);
