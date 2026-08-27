@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import LiveGraph from './LiveGraph'
+import Ticker from './Ticker'
 
 interface Stats {
   entities: number
@@ -40,6 +41,10 @@ function CountUp({ value }: { value: number }) {
       return
     }
     animatedOnce.current = true
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      setShown(value)
+      return
+    }
     const started = performance.now()
     const duration = 1500
     let frame = 0
@@ -53,7 +58,7 @@ function CountUp({ value }: { value: number }) {
     return () => cancelAnimationFrame(frame)
   }, [value])
 
-  return <span className="stat">{shown.toLocaleString('en-US')}</span>
+  return <>{shown.toLocaleString('en-US')}</>
 }
 
 export default function Hero() {
@@ -62,19 +67,33 @@ export default function Hero() {
   return (
     <section className="hero">
       <LiveGraph className="hero-graph" ambient />
+      <div className="hero-scrim" />
       <div className="hero-overlay">
-        <h1 className="hero-title">zeitgeist</h1>
-        <p className="hero-headline">Watch the world&apos;s news become a knowledge graph — live</p>
-        <div className="hero-counters">
-          <div>
-            entities: {stats ? <CountUp value={stats.entities} /> : <span className="stat">–</span>}
-          </div>
-          <div>
-            events: {stats ? <CountUp value={stats.events} /> : <span className="stat">–</span>}
+        <div className="hero-block">
+          <p className="eyebrow">Live from the GDELT firehose · every 15 minutes</p>
+          <h1 className="hero-title">zeitgeist</h1>
+          <p className="hero-headline">The world&apos;s news, becoming a knowledge graph.</p>
+          <div className="hero-stats">
+            <div className="hero-stat">
+              <span className="hero-stat-value">
+                {stats ? <CountUp value={stats.events} /> : '—'}
+              </span>
+              <span className="hero-stat-label">events on the board</span>
+            </div>
+            <div className="hero-stat">
+              <span className="hero-stat-value">
+                {stats ? <CountUp value={stats.entities} /> : '—'}
+              </span>
+              <span className="hero-stat-label">entities</span>
+            </div>
+            <div className="live-badge">
+              <span className="live-dot" />
+              live
+            </div>
           </div>
         </div>
       </div>
-      <div className="scroll-hint">scroll to explore ↓</div>
+      <Ticker />
     </section>
   )
 }

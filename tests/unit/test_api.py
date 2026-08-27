@@ -20,6 +20,16 @@ RECENT_CLAIM_RECORDS = [
     {"subject": "Fed", "relation": "raises", "object": "Rates"},
 ]
 
+RECENT_LLM_RECORDS = [
+    {
+        "subject": "ECB",
+        "relation": "criticizes",
+        "object": "Italy",
+        "detail": "The ECB criticized Italy's budget plans on Tuesday.",
+        "tier": "llm",
+    },
+]
+
 
 class FakeRecords:
     def __init__(self, records):
@@ -48,6 +58,8 @@ class FakeSession:
 
     def run(self, query, **kwargs):
         self.calls.append((query, kwargs))
+        if "ev.detail AS detail" in query:
+            return FakeRecords(RECENT_LLM_RECORDS)
         if "ACTOR1_IN" in query:
             return FakeRecords(RECENT_CLAIM_RECORDS)
         return FakeResult(42 if "Entity" in query else 7)
@@ -220,6 +232,34 @@ def test_recent_ignores_invalid_until_with_a_warning(caplog):
     assert query == api_main.RECENT_CLAIMS_QUERY
     assert kwargs == {"limit": 500}
     assert any("until" in r.message.lower() for r in caplog.records)
+
+
+def test_recent_tier_filter_adds_condition_and_detail_columns():
+    driver = FakeDriver()
+    client = TestClient(create_app(driver=driver, start_consumer=False))
+
+    response = client.get("/recent?tier=llm")
+
+    assert response.status_code == 200
+    query, kwargs = driver.session_instance.calls[-1]
+    assert "WHERE ev.tier = $tier" in query
+    assert "ev.detail AS detail" in query
+    assert kwargs["tier"] == "llm"
+    assert response.json() == {"claims": RECENT_LLM_RECORDS}
+
+
+def test_recent_ignores_invalid_tier(caplog):
+    driver = FakeDriver()
+    client = TestClient(create_app(driver=driver, start_consumer=False))
+
+    with caplog.at_level("WARNING"):
+        response = client.get("/recent?tier=bogus")
+
+    assert response.status_code == 200
+    query, kwargs = driver.session_instance.calls[-1]
+    assert query == api_main.RECENT_CLAIMS_QUERY
+    assert "tier" not in kwargs
+    assert any("tier" in r.message.lower() for r in caplog.records)
 
 
 def test_recent_until_composes_with_limit_clamp():

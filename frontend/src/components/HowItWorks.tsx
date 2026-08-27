@@ -1,42 +1,56 @@
-const CARDS = [
+const STEPS = [
   {
-    icon: '📡',
+    number: '01',
+    label: 'ingest',
+    hue: 170,
     title: 'GDELT firehose',
-    body: 'Machine-read world news — ~130,000 events a day, a fresh batch every 15 minutes.',
+    body: 'Machine-read world news: ~130,000 events a day, a fresh batch every 15 minutes.',
   },
   {
-    icon: '🚚',
+    number: '02',
+    label: 'stream',
+    hue: 120,
     title: 'Self-hosted Kafka',
-    body: 'Durable belts between every stage: at-least-once delivery + idempotent writes = effectively-once.',
+    body: 'Durable belts between every stage. At-least-once delivery + idempotent writes = effectively-once.',
   },
   {
-    icon: '🧠',
-    title: 'LLM enrichment tier',
-    body: 'claude-haiku on a hard daily budget — $0.003 per enriched claim, measured.',
+    number: '03',
+    label: 'enrich',
+    hue: 55,
+    title: 'Claude, on an allowance',
+    body: 'A paced daily budget — $0.003 per enriched claim, measured. The bill cannot surprise.',
   },
   {
-    icon: '🕸️',
+    number: '04',
+    label: 'remember',
+    hue: 15,
     title: 'Temporal Neo4j graph',
-    body: '317,000+ events, never overwritten. Entity resolution via reversible aliases.',
+    body: 'Every event timestamped, none overwritten — the graph contains its own history. Aliases, never merges.',
   },
 ]
 
 export default function HowItWorks() {
   return (
     <section className="section">
+      <p className="eyebrow">The pipeline</p>
       <h2>How it works</h2>
-      <div className="cards">
-        {CARDS.map((card) => (
-          <article className="card" key={card.title}>
-            <div className="card-icon" aria-hidden="true">
-              {card.icon}
+      <div className="steps">
+        {STEPS.map((step) => (
+          <article
+            className="step"
+            key={step.number}
+            style={{ '--step-hue': step.hue } as React.CSSProperties}
+          >
+            <div className="step-head">
+              <span className="step-number">{step.number}</span>
+              <span className="step-label">{step.label}</span>
             </div>
-            <h3>{card.title}</h3>
-            <p>{card.body}</p>
+            <h3>{step.title}</h3>
+            <p>{step.body}</p>
           </article>
         ))}
       </div>
-      <p className="how-footer">Total bill: ~$24/month including the AI.</p>
+      <p className="how-footer">Runs on a €6 server in Helsinki. ~$24/month all-in, AI included.</p>
     </section>
   )
 }
