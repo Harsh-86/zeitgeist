@@ -1,0 +1,17 @@
+# Compose builds use the repo root as context (context: ..) for all services —
+# keep the context lean: exclude everything the images don't need.
+.git
+.venv
+.pytest_cache
+.ruff_cache
+__pycache__
+**/__pycache__
+frontend/node_modules
+frontend/dist
+data
+state
+docs
+devlog
+.superpowers
+.claude
+.env

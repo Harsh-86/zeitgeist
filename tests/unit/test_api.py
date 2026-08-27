@@ -20,6 +20,16 @@ RECENT_CLAIM_RECORDS = [
     {"subject": "Fed", "relation": "raises", "object": "Rates"},
 ]
 
+RECENT_LLM_RECORDS = [
+    {
+        "subject": "ECB",
+        "relation": "criticizes",
+        "object": "Italy",
+        "detail": "The ECB criticized Italy's budget plans on Tuesday.",
+        "tier": "llm",
+    },
+]
+
 
 class FakeRecords:
     def __init__(self, records):
@@ -48,6 +58,8 @@ class FakeSession:
 
     def run(self, query, **kwargs):
         self.calls.append((query, kwargs))
+        if "ev.detail AS detail" in query:
+            return FakeRecords(RECENT_LLM_RECORDS)
         if "ACTOR1_IN" in query:
             return FakeRecords(RECENT_CLAIM_RECORDS)
         return FakeResult(42 if "Entity" in query else 7)
@@ -220,6 +232,34 @@ def test_recent_ignores_invalid_until_with_a_warning(caplog):
     assert query == api_main.RECENT_CLAIMS_QUERY
     assert kwargs == {"limit": 500}
     assert any("until" in r.message.lower() for r in caplog.records)
+
+
+def test_recent_tier_filter_adds_condition_and_detail_columns():
+    driver = FakeDriver()
+    client = TestClient(create_app(driver=driver, start_consumer=False))
+
+    response = client.get("/recent?tier=llm")
+
+    assert response.status_code == 200
+    query, kwargs = driver.session_instance.calls[-1]
+    assert "WHERE ev.tier = $tier" in query
+    assert "ev.detail AS detail" in query
+    assert kwargs["tier"] == "llm"
+    assert response.json() == {"claims": RECENT_LLM_RECORDS}
+
+
+def test_recent_ignores_invalid_tier(caplog):
+    driver = FakeDriver()
+    client = TestClient(create_app(driver=driver, start_consumer=False))
+
+    with caplog.at_level("WARNING"):
+        response = client.get("/recent?tier=bogus")
+
+    assert response.status_code == 200
+    query, kwargs = driver.session_instance.calls[-1]
+    assert query == api_main.RECENT_CLAIMS_QUERY
+    assert "tier" not in kwargs
+    assert any("tier" in r.message.lower() for r in caplog.records)
 
 
 def test_recent_until_composes_with_limit_clamp():
@@ -561,6 +601,35 @@ def test_main_starts_metrics_server_when_port_configured(monkeypatch):
     api_main.main()
 
     assert calls == [9306]
+
+
+# -- frontend static serving -----------------------------------------------------
+
+
+def test_frontend_mount_skipped_when_dist_absent(tmp_path, monkeypatch, caplog):
+    monkeypatch.setenv("FRONTEND_DIST_PATH", str(tmp_path / "no-such-dist"))
+
+    with caplog.at_level("WARNING"):
+        client = TestClient(create_app(driver=FakeDriver(), start_consumer=False))
+
+    assert client.get("/healthz").json() == {"status": "ok"}
+    assert client.get("/").status_code == 404
+    assert any("frontend" in r.message.lower() for r in caplog.records)
+
+
+def test_frontend_index_served_when_dist_present(tmp_path, monkeypatch):
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    (dist / "index.html").write_text("<html><body>zeitgeist frontend</body></html>")
+    monkeypatch.setenv("FRONTEND_DIST_PATH", str(dist))
+
+    client = TestClient(create_app(driver=FakeDriver(), start_consumer=False))
+
+    response = client.get("/")
+    assert response.status_code == 200
+    assert "zeitgeist frontend" in response.text
+    # API routes keep precedence over the static mount.
+    assert client.get("/stats").json() == {"entities": 42, "events": 7}
 
 
 def test_main_does_not_start_metrics_server_when_port_is_zero(monkeypatch):

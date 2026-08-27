@@ -11,7 +11,8 @@ from pathlib import Path
 
 from fastapi import FastAPI, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from zeitgeist.agent.query import validate_cypher
@@ -45,21 +46,28 @@ RECENT_CLAIMS_RETURN = (
 )
 RECENT_SINCE_CONDITION = "ev.observed_at >= datetime($since)"
 RECENT_UNTIL_CONDITION = "ev.observed_at <= datetime($until)"
+RECENT_TIER_CONDITION = "ev.tier = $tier"
+# Tier-filtered requests (the frontend wire) also want the llm-only fields.
+RECENT_TIER_RETURN = (
+    "RETURN s.name AS subject, ev.relation AS relation, o.name AS object, "
+    "ev.detail AS detail, ev.tier AS tier "
+    "ORDER BY ev.observed_at DESC LIMIT $limit"
+)
 RECENT_CLAIMS_QUERY = RECENT_CLAIMS_MATCH + RECENT_CLAIMS_RETURN
+_VALID_TIERS = {"rules", "llm"}
 
-_DEFAULT_DASHBOARD_INDEX = Path(__file__).resolve().parents[3] / "dashboard" / "index.html"
+_DEFAULT_FRONTEND_DIST = Path(__file__).resolve().parents[3] / "frontend" / "dist"
 
 
-def _dashboard_index() -> Path:
-    """Resolve the dashboard entry point, overridable via DASHBOARD_PATH.
+def _frontend_dist() -> Path:
+    """Resolve the built frontend directory, overridable via FRONTEND_DIST_PATH.
 
     In the Docker image the package is pip-installed into site-packages, so the
-    source-tree-relative default (parents[3]/dashboard/index.html) does not
-    resolve to /app/dashboard. Compose sets DASHBOARD_PATH=/app/dashboard/index.html
-    in that environment.
+    source-tree-relative default (parents[3]/frontend/dist) does not resolve to
+    /app/frontend/dist. Compose sets FRONTEND_DIST_PATH=/app/frontend/dist there.
     """
-    override = os.getenv("DASHBOARD_PATH")
-    return Path(override) if override else _DEFAULT_DASHBOARD_INDEX
+    override = os.getenv("FRONTEND_DIST_PATH")
+    return Path(override) if override else _DEFAULT_FRONTEND_DIST
 
 
 def _parse_window_param(name: str, value: str | None) -> str | None:
@@ -77,15 +85,22 @@ def _parse_window_param(name: str, value: str | None) -> str | None:
         return None
 
 
-def _recent_claims_query(since: str | None, until: str | None) -> str:
-    """Assemble the /recent query; no window params yields RECENT_CLAIMS_QUERY verbatim."""
+def _recent_claims_query(since: str | None, until: str | None, tier: str | None = None) -> str:
+    """Assemble the /recent query; no params yields RECENT_CLAIMS_QUERY verbatim.
+
+    A tier filter also switches to the wider RETURN (detail + tier columns),
+    which the frontend wire ticker consumes.
+    """
     conditions = []
     if since is not None:
         conditions.append(RECENT_SINCE_CONDITION)
     if until is not None:
         conditions.append(RECENT_UNTIL_CONDITION)
+    if tier is not None:
+        conditions.append(RECENT_TIER_CONDITION)
     where = f"WHERE {' AND '.join(conditions)} " if conditions else ""
-    return RECENT_CLAIMS_MATCH + where + RECENT_CLAIMS_RETURN
+    returns = RECENT_TIER_RETURN if tier is not None else RECENT_CLAIMS_RETURN
+    return RECENT_CLAIMS_MATCH + where + returns
 
 
 def _ask_error(message: str) -> dict:
@@ -199,23 +214,32 @@ def create_app(
         return {"entities": entities, "events": events}
 
     @app.get("/recent")
-    def recent(limit: int = 500, until: str | None = None, since: str | None = None) -> dict:
+    def recent(
+        limit: int = 500,
+        until: str | None = None,
+        since: str | None = None,
+        tier: str | None = None,
+    ) -> dict:
         capped_limit = max(1, min(limit, 1000))
         params: dict = {"limit": capped_limit}
         normalized_since = _parse_window_param("since", since)
         normalized_until = _parse_window_param("until", until)
+        valid_tier = tier if tier in _VALID_TIERS else None
+        if tier is not None and valid_tier is None:
+            logger.warning("ignoring invalid tier value for /recent: %r", tier[:100])
         if normalized_since is not None:
             params["since"] = normalized_since
         if normalized_until is not None:
             params["until"] = normalized_until
-        query = _recent_claims_query(normalized_since, normalized_until)
+        if valid_tier is not None:
+            params["tier"] = valid_tier
+        query = _recent_claims_query(normalized_since, normalized_until, valid_tier)
+        base_keys = ("subject", "relation", "object")
+        keys = (*base_keys, "detail", "tier") if valid_tier is not None else base_keys
         try:
             with app.state.driver.session() as session:
                 result = session.run(query, **params)
-                claims = [
-                    {"subject": r["subject"], "relation": r["relation"], "object": r["object"]}
-                    for r in result
-                ]
+                claims = [{key: r[key] for key in keys} for r in result]
         except Exception:
             logger.warning("failed to fetch recent claims for /recent", exc_info=True)
             return {"claims": []}
@@ -310,10 +334,6 @@ def create_app(
             ASK_FAILED.inc()
         return JSONResponse(result)
 
-    @app.get("/")
-    def index() -> FileResponse:
-        return FileResponse(_dashboard_index())
-
     @app.get("/metrics")
     def metrics() -> Response:
         try:
@@ -335,6 +355,15 @@ def create_app(
                 await ws.receive_text()  # keepalive; clients don't send data
         except WebSocketDisconnect:
             broadcaster.unregister(ws)
+
+    # Mounted LAST so every API route above takes precedence. Skipped (with a
+    # warning) when no built frontend exists — dev environments without an
+    # `npm run build` must still serve the API.
+    frontend_dist = _frontend_dist()
+    if frontend_dist.is_dir():
+        app.mount("/", StaticFiles(directory=frontend_dist, html=True), name="frontend")
+    else:
+        logger.warning("frontend dist not found at %s; serving API only", frontend_dist)
 
     return app
 
