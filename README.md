@@ -9,7 +9,7 @@ dashboard where you can watch the world become a graph.
 ## Quick start
 
 ```bash
-make up      # start everything (Kafka, Neo4j, services, dashboard)
+make up      # start everything (Kafka, Neo4j, services, web app)
 make test    # unit tests
 make smoke   # end-to-end smoke test
 ```

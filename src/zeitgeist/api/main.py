@@ -11,7 +11,8 @@ from pathlib import Path
 
 from fastapi import FastAPI, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from zeitgeist.agent.query import validate_cypher
@@ -47,19 +48,18 @@ RECENT_SINCE_CONDITION = "ev.observed_at >= datetime($since)"
 RECENT_UNTIL_CONDITION = "ev.observed_at <= datetime($until)"
 RECENT_CLAIMS_QUERY = RECENT_CLAIMS_MATCH + RECENT_CLAIMS_RETURN
 
-_DEFAULT_DASHBOARD_INDEX = Path(__file__).resolve().parents[3] / "dashboard" / "index.html"
+_DEFAULT_FRONTEND_DIST = Path(__file__).resolve().parents[3] / "frontend" / "dist"
 
 
-def _dashboard_index() -> Path:
-    """Resolve the dashboard entry point, overridable via DASHBOARD_PATH.
+def _frontend_dist() -> Path:
+    """Resolve the built frontend directory, overridable via FRONTEND_DIST_PATH.
 
     In the Docker image the package is pip-installed into site-packages, so the
-    source-tree-relative default (parents[3]/dashboard/index.html) does not
-    resolve to /app/dashboard. Compose sets DASHBOARD_PATH=/app/dashboard/index.html
-    in that environment.
+    source-tree-relative default (parents[3]/frontend/dist) does not resolve to
+    /app/frontend/dist. Compose sets FRONTEND_DIST_PATH=/app/frontend/dist there.
     """
-    override = os.getenv("DASHBOARD_PATH")
-    return Path(override) if override else _DEFAULT_DASHBOARD_INDEX
+    override = os.getenv("FRONTEND_DIST_PATH")
+    return Path(override) if override else _DEFAULT_FRONTEND_DIST
 
 
 def _parse_window_param(name: str, value: str | None) -> str | None:
@@ -310,10 +310,6 @@ def create_app(
             ASK_FAILED.inc()
         return JSONResponse(result)
 
-    @app.get("/")
-    def index() -> FileResponse:
-        return FileResponse(_dashboard_index())
-
     @app.get("/metrics")
     def metrics() -> Response:
         try:
@@ -335,6 +331,15 @@ def create_app(
                 await ws.receive_text()  # keepalive; clients don't send data
         except WebSocketDisconnect:
             broadcaster.unregister(ws)
+
+    # Mounted LAST so every API route above takes precedence. Skipped (with a
+    # warning) when no built frontend exists — dev environments without an
+    # `npm run build` must still serve the API.
+    frontend_dist = _frontend_dist()
+    if frontend_dist.is_dir():
+        app.mount("/", StaticFiles(directory=frontend_dist, html=True), name="frontend")
+    else:
+        logger.warning("frontend dist not found at %s; serving API only", frontend_dist)
 
     return app
 

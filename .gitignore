@@ -12,3 +12,5 @@ dist/
 data/
 state/
 devlog/
+frontend/node_modules/
+frontend/dist/

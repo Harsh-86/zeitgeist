@@ -1,4 +1,4 @@
-.PHONY: test lint integration up down smoke
+.PHONY: test lint integration up down smoke frontend-dev
 
 test:  # unit tests only (fast, no Docker)
 	uv run pytest tests/unit -q
@@ -17,3 +17,6 @@ down:
 
 smoke:
 	KAFKA_BOOTSTRAP=localhost:29092 uv run python scripts/smoke_test.py
+
+frontend-dev:  # hot-reload dev server; API calls proxy to localhost:8000 (make up)
+	cd frontend && npm run dev

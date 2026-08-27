@@ -563,6 +563,35 @@ def test_main_starts_metrics_server_when_port_configured(monkeypatch):
     assert calls == [9306]
 
 
+# -- frontend static serving -----------------------------------------------------
+
+
+def test_frontend_mount_skipped_when_dist_absent(tmp_path, monkeypatch, caplog):
+    monkeypatch.setenv("FRONTEND_DIST_PATH", str(tmp_path / "no-such-dist"))
+
+    with caplog.at_level("WARNING"):
+        client = TestClient(create_app(driver=FakeDriver(), start_consumer=False))
+
+    assert client.get("/healthz").json() == {"status": "ok"}
+    assert client.get("/").status_code == 404
+    assert any("frontend" in r.message.lower() for r in caplog.records)
+
+
+def test_frontend_index_served_when_dist_present(tmp_path, monkeypatch):
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    (dist / "index.html").write_text("<html><body>zeitgeist frontend</body></html>")
+    monkeypatch.setenv("FRONTEND_DIST_PATH", str(dist))
+
+    client = TestClient(create_app(driver=FakeDriver(), start_consumer=False))
+
+    response = client.get("/")
+    assert response.status_code == 200
+    assert "zeitgeist frontend" in response.text
+    # API routes keep precedence over the static mount.
+    assert client.get("/stats").json() == {"entities": 42, "events": 7}
+
+
 def test_main_does_not_start_metrics_server_when_port_is_zero(monkeypatch):
     monkeypatch.delenv("METRICS_PORT", raising=False)
     calls = []

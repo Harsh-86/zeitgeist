@@ -4,7 +4,7 @@ x-service-env: &service-env
   NEO4J_USER: neo4j
   NEO4J_PASSWORD: ${NEO4J_PASSWORD:-zeitgeist-dev}
   STATE_PATH: /state/ingestor.json
-  DASHBOARD_PATH: /app/dashboard/index.html
+  FRONTEND_DIST_PATH: /app/frontend/dist
 
 services:
   kafka:
