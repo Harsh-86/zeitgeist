@@ -53,6 +53,18 @@ def test_llm_env_overrides(monkeypatch):
     assert settings.llm_model == "claude-opus-5"
 
 
+def test_llm_archive_dir_default_is_empty_meaning_disabled(monkeypatch):
+    monkeypatch.delenv("LLM_ARCHIVE_DIR", raising=False)
+    settings = Settings.from_env()
+    assert settings.llm_archive_dir == ""
+
+
+def test_llm_archive_dir_env_override(monkeypatch):
+    monkeypatch.setenv("LLM_ARCHIVE_DIR", "/state/llm_archive")
+    settings = Settings.from_env()
+    assert settings.llm_archive_dir == "/state/llm_archive"
+
+
 def test_llm_budget_state_path_default(monkeypatch):
     monkeypatch.delenv("LLM_BUDGET_STATE_PATH", raising=False)
     settings = Settings.from_env()
