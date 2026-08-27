@@ -20,6 +20,16 @@ RECENT_CLAIM_RECORDS = [
     {"subject": "Fed", "relation": "raises", "object": "Rates"},
 ]
 
+RECENT_LLM_RECORDS = [
+    {
+        "subject": "ECB",
+        "relation": "criticizes",
+        "object": "Italy",
+        "detail": "The ECB criticized Italy's budget plans on Tuesday.",
+        "tier": "llm",
+    },
+]
+
 
 class FakeRecords:
     def __init__(self, records):
@@ -29,15 +39,37 @@ class FakeRecords:
         return iter(self._records)
 
 
+class _FakeTx:
+    def __init__(self, session):
+        self._session = session
+
+    def run(self, query, **kwargs):
+        self._session.read_queries.append(query)
+        return self._session.ask_records
+
+
 class FakeSession:
-    def __init__(self):
+    def __init__(self, ask_records=None, execute_read_failures=0):
         self.calls = []
+        self.read_queries = []
+        self.execute_read_calls = 0
+        self.ask_records = ask_records or []
+        self._execute_read_failures = execute_read_failures
 
     def run(self, query, **kwargs):
         self.calls.append((query, kwargs))
+        if "ev.detail AS detail" in query:
+            return FakeRecords(RECENT_LLM_RECORDS)
         if "ACTOR1_IN" in query:
             return FakeRecords(RECENT_CLAIM_RECORDS)
         return FakeResult(42 if "Entity" in query else 7)
+
+    def execute_read(self, fn):
+        self.execute_read_calls += 1
+        if self._execute_read_failures > 0:
+            self._execute_read_failures -= 1
+            raise RuntimeError("neo4j syntax error")
+        return fn(_FakeTx(self))
 
     def __enter__(self):
         return self
@@ -47,8 +79,8 @@ class FakeSession:
 
 
 class FakeDriver:
-    def __init__(self):
-        self.session_instance = FakeSession()
+    def __init__(self, session=None):
+        self.session_instance = session if session is not None else FakeSession()
 
     def session(self):
         return self.session_instance
@@ -131,6 +163,118 @@ def test_recent_limit_is_floored_at_1_for_negative():
     assert driver.session_instance.calls[-1][1]["limit"] == 1
 
 
+def test_recent_without_params_runs_the_unmodified_recent_claims_query():
+    driver = FakeDriver()
+    client = TestClient(create_app(driver=driver, start_consumer=False))
+
+    response = client.get("/recent")
+
+    assert response.status_code == 200
+    query, kwargs = driver.session_instance.calls[-1]
+    assert query == api_main.RECENT_CLAIMS_QUERY
+    assert kwargs == {"limit": 500}
+
+
+def test_recent_until_adds_where_clause_and_normalized_param():
+    driver = FakeDriver()
+    client = TestClient(create_app(driver=driver, start_consumer=False))
+
+    response = client.get("/recent?until=2026-08-25T14:00:00Z")
+
+    assert response.status_code == 200
+    query, kwargs = driver.session_instance.calls[-1]
+    assert "WHERE ev.observed_at <= datetime($until)" in query
+    assert query.endswith("ORDER BY ev.observed_at DESC LIMIT $limit")
+    assert kwargs["until"] == "2026-08-25T14:00:00+00:00"
+    assert kwargs["limit"] == 500
+    assert "since" not in kwargs
+
+
+def test_recent_since_adds_where_clause_and_normalized_param():
+    driver = FakeDriver()
+    client = TestClient(create_app(driver=driver, start_consumer=False))
+
+    response = client.get("/recent?since=2026-08-20T00:00:00")
+
+    assert response.status_code == 200
+    query, kwargs = driver.session_instance.calls[-1]
+    assert "WHERE ev.observed_at >= datetime($since)" in query
+    assert query.endswith("ORDER BY ev.observed_at DESC LIMIT $limit")
+    assert kwargs["since"] == "2026-08-20T00:00:00"
+    assert kwargs["limit"] == 500
+    assert "until" not in kwargs
+
+
+def test_recent_since_and_until_are_anded_with_both_params():
+    driver = FakeDriver()
+    client = TestClient(create_app(driver=driver, start_consumer=False))
+
+    response = client.get("/recent?since=2026-08-20T00:00:00Z&until=2026-08-25T14:00:00Z")
+
+    assert response.status_code == 200
+    query, kwargs = driver.session_instance.calls[-1]
+    assert (
+        "WHERE ev.observed_at >= datetime($since) AND ev.observed_at <= datetime($until)" in query
+    )
+    assert kwargs["since"] == "2026-08-20T00:00:00+00:00"
+    assert kwargs["until"] == "2026-08-25T14:00:00+00:00"
+
+
+def test_recent_ignores_invalid_until_with_a_warning(caplog):
+    driver = FakeDriver()
+    client = TestClient(create_app(driver=driver, start_consumer=False))
+
+    with caplog.at_level("WARNING"):
+        response = client.get("/recent?until=not-a-date")
+
+    assert response.status_code == 200
+    query, kwargs = driver.session_instance.calls[-1]
+    assert query == api_main.RECENT_CLAIMS_QUERY
+    assert kwargs == {"limit": 500}
+    assert any("until" in r.message.lower() for r in caplog.records)
+
+
+def test_recent_tier_filter_adds_condition_and_detail_columns():
+    driver = FakeDriver()
+    client = TestClient(create_app(driver=driver, start_consumer=False))
+
+    response = client.get("/recent?tier=llm")
+
+    assert response.status_code == 200
+    query, kwargs = driver.session_instance.calls[-1]
+    assert "WHERE ev.tier = $tier" in query
+    assert "ev.detail AS detail" in query
+    assert kwargs["tier"] == "llm"
+    assert response.json() == {"claims": RECENT_LLM_RECORDS}
+
+
+def test_recent_ignores_invalid_tier(caplog):
+    driver = FakeDriver()
+    client = TestClient(create_app(driver=driver, start_consumer=False))
+
+    with caplog.at_level("WARNING"):
+        response = client.get("/recent?tier=bogus")
+
+    assert response.status_code == 200
+    query, kwargs = driver.session_instance.calls[-1]
+    assert query == api_main.RECENT_CLAIMS_QUERY
+    assert "tier" not in kwargs
+    assert any("tier" in r.message.lower() for r in caplog.records)
+
+
+def test_recent_until_composes_with_limit_clamp():
+    driver = FakeDriver()
+    client = TestClient(create_app(driver=driver, start_consumer=False))
+
+    response = client.get("/recent?until=2026-08-25T14:00:00Z&limit=5000")
+
+    assert response.status_code == 200
+    query, kwargs = driver.session_instance.calls[-1]
+    assert "WHERE ev.observed_at <= datetime($until)" in query
+    assert kwargs["limit"] == 1000
+    assert kwargs["until"] == "2026-08-25T14:00:00+00:00"
+
+
 def test_recent_survives_neo4j_failure_and_returns_empty_claims(caplog):
     client = TestClient(create_app(driver=FailingDriver(), start_consumer=False))
 
@@ -148,6 +292,274 @@ def test_websocket_receives_broadcast():
         broadcaster = client.app.state.broadcaster
         client.portal.call(broadcaster.broadcast, '{"subject": "ECB"}')
         assert ws.receive_text() == '{"subject": "ECB"}'
+
+
+# -- POST /ask -------------------------------------------------------------------
+
+
+ASK_TOKEN = "test-ask-token"
+SAFE_CYPHER = (
+    "MATCH (s:Entity)-[:ACTOR1_IN]->(ev:Event) "
+    "RETURN s.name AS subject, ev.source_url AS source_url LIMIT 5"
+)
+ASK_RECORDS = [
+    {"subject": "GERMANY", "source_url": "https://a.example/1"},
+    {"subject": "FRANCE", "source_url": "https://b.example/2"},
+    {"subject": "GERMANY", "source_url": "https://a.example/1"},
+    {"subject": "POLAND", "source_url": None},
+]
+
+
+class FakeQueryAgent:
+    """Scripted stand-in for agent.query.QueryAgent; records every call."""
+
+    def __init__(self, cyphers=None, answer="THE ANSWER"):
+        self.generate_calls = []
+        self.synthesize_calls = []
+        self._cyphers = list(cyphers or [])
+        self._answer = answer
+
+    def generate_cypher(self, question, error_feedback=None):
+        self.generate_calls.append((question, error_feedback))
+        if self._cyphers:
+            return self._cyphers.pop(0), {}
+        return None, {}
+
+    def synthesize(self, question, records):
+        self.synthesize_calls.append((question, records))
+        return self._answer, {}
+
+
+class FakeBudget:
+    """try_spend returns scripted results (then False); None means always True."""
+
+    def __init__(self, results=None):
+        self._results = list(results) if results is not None else None
+        self.calls = 0
+
+    def try_spend(self):
+        self.calls += 1
+        if self._results is None:
+            return True
+        return self._results.pop(0) if self._results else False
+
+
+def make_ask_client(monkeypatch, agent=None, budget=None, session=None, token=ASK_TOKEN):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    if token is None:
+        monkeypatch.delenv("ASK_TOKEN", raising=False)
+    else:
+        monkeypatch.setenv("ASK_TOKEN", token)
+    driver = FakeDriver(session=session)
+    app = create_app(driver=driver, start_consumer=False, agent=agent, ask_budget=budget)
+    return TestClient(app), driver
+
+
+def ask(client, question="What happened around GERMANY?", token=ASK_TOKEN, body=...):
+    headers = {} if token is None else {"X-Ask-Token": token}
+    if body is ...:
+        body = {"question": question}
+    if body is None:
+        return client.post("/ask", headers=headers)
+    return client.post("/ask", json=body, headers=headers)
+
+
+def error_body(message):
+    return {
+        "answer": None,
+        "cypher": None,
+        "citations": [],
+        "records_count": 0,
+        "error": message,
+    }
+
+
+def test_ask_403_when_token_unset(monkeypatch):
+    client, _ = make_ask_client(monkeypatch, agent=FakeQueryAgent(), token=None)
+    response = ask(client)
+    assert response.status_code == 403
+    assert response.json() == {"error": "ask endpoint disabled"}
+
+
+def test_ask_403_when_token_wrong(monkeypatch):
+    client, _ = make_ask_client(monkeypatch, agent=FakeQueryAgent())
+    response = ask(client, token="wrong-token")
+    assert response.status_code == 403
+    assert response.json() == {"error": "invalid token"}
+
+
+def test_ask_403_when_token_header_missing(monkeypatch):
+    client, _ = make_ask_client(monkeypatch, agent=FakeQueryAgent())
+    response = ask(client, token=None)
+    assert response.status_code == 403
+    assert response.json() == {"error": "invalid token"}
+
+
+def test_ask_403_not_500_on_non_ascii_token_header(monkeypatch):
+    # compare_digest raises TypeError on non-ASCII str; the gate must compare
+    # bytes so an attacker-controlled header can never crash the endpoint.
+    client, _ = make_ask_client(monkeypatch, agent=FakeQueryAgent())
+    # Send as latin-1 bytes: that's how a raw client smuggles non-ASCII past
+    # httpx's own str-header validation, and how the server actually sees it.
+    response = client.post(
+        "/ask",
+        json={"question": "q"},
+        headers={b"X-Ask-Token": "ééé".encode("latin-1")},
+    )
+    assert response.status_code == 403
+    assert response.json() == {"error": "invalid token"}
+
+
+def test_ask_400_when_body_too_large(monkeypatch):
+    client, _ = make_ask_client(monkeypatch, agent=FakeQueryAgent())
+    response = ask(client, body={"question": "q", "padding": "x" * 20_000})
+    assert response.status_code == 400
+    assert response.json() == {"error": "request body too large"}
+
+
+def test_ask_400_when_no_body(monkeypatch):
+    client, _ = make_ask_client(monkeypatch, agent=FakeQueryAgent())
+    response = ask(client, body=None)
+    assert response.status_code == 400
+    assert response.json()["error"]
+
+
+def test_ask_400_when_question_missing(monkeypatch):
+    client, _ = make_ask_client(monkeypatch, agent=FakeQueryAgent())
+    response = ask(client, body={})
+    assert response.status_code == 400
+    assert response.json()["error"]
+
+
+def test_ask_400_when_question_empty(monkeypatch):
+    client, _ = make_ask_client(monkeypatch, agent=FakeQueryAgent())
+    response = ask(client, body={"question": "  "})
+    assert response.status_code == 400
+    assert response.json()["error"]
+
+
+def test_ask_400_when_question_too_long(monkeypatch):
+    client, _ = make_ask_client(monkeypatch, agent=FakeQueryAgent())
+    response = ask(client, question="x" * 501)
+    assert response.status_code == 400
+    assert response.json()["error"]
+
+
+def test_ask_reports_agent_not_configured_when_agent_is_none(monkeypatch):
+    client, _ = make_ask_client(monkeypatch, agent=None)
+    response = ask(client)
+    assert response.status_code == 200
+    assert response.json() == error_body("ask agent not configured")
+
+
+def test_ask_happy_path_answers_with_deduped_citations(monkeypatch):
+    agent = FakeQueryAgent(cyphers=[SAFE_CYPHER])
+    budget = FakeBudget()
+    session = FakeSession(ask_records=ASK_RECORDS)
+    client, _ = make_ask_client(monkeypatch, agent=agent, budget=budget, session=session)
+    questions_before = api_main.ASK_QUESTIONS._value.get()
+
+    response = ask(client)
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "answer": "THE ANSWER",
+        "cypher": SAFE_CYPHER,
+        "citations": ["https://a.example/1", "https://b.example/2"],
+        "records_count": 4,
+        "error": None,
+    }
+    assert session.read_queries == [SAFE_CYPHER]
+    assert agent.generate_calls == [("What happened around GERMANY?", None)]
+    assert agent.synthesize_calls == [("What happened around GERMANY?", ASK_RECORDS)]
+    assert budget.calls == 2
+    assert api_main.ASK_QUESTIONS._value.get() == questions_before + 1
+
+
+def test_ask_rejects_write_cypher_without_executing(monkeypatch):
+    agent = FakeQueryAgent(cyphers=["CREATE (n:Entity {name: 'X'}) RETURN n"])
+    session = FakeSession(ask_records=ASK_RECORDS)
+    client, _ = make_ask_client(monkeypatch, agent=agent, budget=FakeBudget(), session=session)
+    failed_before = api_main.ASK_FAILED._value.get()
+
+    response = ask(client)
+
+    assert response.status_code == 200
+    assert response.json() == error_body("could not generate a safe query")
+    assert session.execute_read_calls == 0
+    assert api_main.ASK_FAILED._value.get() == failed_before + 1
+
+
+def test_ask_retries_once_with_error_feedback_then_succeeds(monkeypatch):
+    retry_cypher = "MATCH (ev:Event) RETURN ev.source_url AS source_url LIMIT 3"
+    agent = FakeQueryAgent(cyphers=[SAFE_CYPHER, retry_cypher])
+    budget = FakeBudget()
+    session = FakeSession(ask_records=ASK_RECORDS, execute_read_failures=1)
+    client, _ = make_ask_client(monkeypatch, agent=agent, budget=budget, session=session)
+
+    response = ask(client)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["error"] is None
+    assert body["cypher"] == retry_cypher
+    assert len(agent.generate_calls) == 2
+    feedback = agent.generate_calls[1][1]
+    assert SAFE_CYPHER in feedback
+    assert "neo4j syntax error" in feedback
+    assert budget.calls == 3
+    assert session.read_queries == [retry_cypher]
+
+
+def test_ask_reports_query_execution_failed_after_two_failures(monkeypatch):
+    agent = FakeQueryAgent(cyphers=[SAFE_CYPHER, SAFE_CYPHER])
+    session = FakeSession(ask_records=ASK_RECORDS, execute_read_failures=2)
+    client, _ = make_ask_client(monkeypatch, agent=agent, budget=FakeBudget(), session=session)
+
+    response = ask(client)
+
+    assert response.status_code == 200
+    assert response.json() == error_body("query execution failed")
+    assert len(agent.generate_calls) == 2
+
+
+def test_ask_denies_when_budget_exhausted(monkeypatch):
+    agent = FakeQueryAgent(cyphers=[SAFE_CYPHER])
+    budget = FakeBudget(results=[False])
+    client, _ = make_ask_client(monkeypatch, agent=agent, budget=budget)
+    denied_before = api_main.ASK_DENIED._value.get()
+
+    response = ask(client)
+
+    assert response.status_code == 200
+    assert response.json() == error_body("daily ask budget exhausted")
+    assert agent.generate_calls == []
+    assert api_main.ASK_DENIED._value.get() == denied_before + 1
+
+
+def test_ask_reports_synthesis_failure_when_answer_is_none(monkeypatch):
+    agent = FakeQueryAgent(cyphers=[SAFE_CYPHER], answer=None)
+    session = FakeSession(ask_records=ASK_RECORDS)
+    client, _ = make_ask_client(monkeypatch, agent=agent, budget=FakeBudget(), session=session)
+
+    response = ask(client)
+
+    assert response.status_code == 200
+    assert response.json() == error_body("could not synthesize an answer")
+
+
+def test_ask_never_500s_on_unexpected_exception(monkeypatch, caplog):
+    class ExplodingAgent:
+        def generate_cypher(self, question, error_feedback=None):
+            raise ValueError("boom")
+
+    client, _ = make_ask_client(monkeypatch, agent=ExplodingAgent(), budget=FakeBudget())
+
+    with caplog.at_level("WARNING"):
+        response = ask(client)
+
+    assert response.status_code == 200
+    assert response.json() == error_body("internal error")
 
 
 # -- metrics instrumentation ---------------------------------------------------
@@ -189,6 +601,35 @@ def test_main_starts_metrics_server_when_port_configured(monkeypatch):
     api_main.main()
 
     assert calls == [9306]
+
+
+# -- frontend static serving -----------------------------------------------------
+
+
+def test_frontend_mount_skipped_when_dist_absent(tmp_path, monkeypatch, caplog):
+    monkeypatch.setenv("FRONTEND_DIST_PATH", str(tmp_path / "no-such-dist"))
+
+    with caplog.at_level("WARNING"):
+        client = TestClient(create_app(driver=FakeDriver(), start_consumer=False))
+
+    assert client.get("/healthz").json() == {"status": "ok"}
+    assert client.get("/").status_code == 404
+    assert any("frontend" in r.message.lower() for r in caplog.records)
+
+
+def test_frontend_index_served_when_dist_present(tmp_path, monkeypatch):
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    (dist / "index.html").write_text("<html><body>zeitgeist frontend</body></html>")
+    monkeypatch.setenv("FRONTEND_DIST_PATH", str(dist))
+
+    client = TestClient(create_app(driver=FakeDriver(), start_consumer=False))
+
+    response = client.get("/")
+    assert response.status_code == 200
+    assert "zeitgeist frontend" in response.text
+    # API routes keep precedence over the static mount.
+    assert client.get("/stats").json() == {"entities": 42, "events": 7}
 
 
 def test_main_does_not_start_metrics_server_when_port_is_zero(monkeypatch):

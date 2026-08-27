@@ -12,3 +12,8 @@ dist/
 data/
 state/
 devlog/
+frontend/node_modules/
+frontend/dist/
+# Playwright MCP session artifacts (screenshots, snapshots)
+.playwright-mcp/
+/*.png
