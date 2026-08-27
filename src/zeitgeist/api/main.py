@@ -38,11 +38,14 @@ ASK_FAILED = get_counter(
 _MAX_QUESTION_CHARS = 500
 _MAX_BODY_BYTES = 10_000
 
-RECENT_CLAIMS_QUERY = (
-    "MATCH (s:Entity)-[:ACTOR1_IN]->(ev:Event)-[:ACTOR2]->(o:Entity) "
+RECENT_CLAIMS_MATCH = "MATCH (s:Entity)-[:ACTOR1_IN]->(ev:Event)-[:ACTOR2]->(o:Entity) "
+RECENT_CLAIMS_RETURN = (
     "RETURN s.name AS subject, ev.relation AS relation, o.name AS object "
     "ORDER BY ev.observed_at DESC LIMIT $limit"
 )
+RECENT_SINCE_CONDITION = "ev.observed_at >= datetime($since)"
+RECENT_UNTIL_CONDITION = "ev.observed_at <= datetime($until)"
+RECENT_CLAIMS_QUERY = RECENT_CLAIMS_MATCH + RECENT_CLAIMS_RETURN
 
 _DEFAULT_DASHBOARD_INDEX = Path(__file__).resolve().parents[3] / "dashboard" / "index.html"
 
@@ -57,6 +60,32 @@ def _dashboard_index() -> Path:
     """
     override = os.getenv("DASHBOARD_PATH")
     return Path(override) if override else _DEFAULT_DASHBOARD_INDEX
+
+
+def _parse_window_param(name: str, value: str | None) -> str | None:
+    """Normalize an ISO-8601 /recent window param; invalid values are ignored with a warning.
+
+    Naive values (no offset) are interpreted as UTC by Neo4j's datetime() —
+    the server default — which matches observed_at, always written as UTC.
+    """
+    if value is None:
+        return None
+    try:
+        return datetime.fromisoformat(value).isoformat()
+    except ValueError:
+        logger.warning("ignoring invalid %s value for /recent: %r", name, value[:100])
+        return None
+
+
+def _recent_claims_query(since: str | None, until: str | None) -> str:
+    """Assemble the /recent query; no window params yields RECENT_CLAIMS_QUERY verbatim."""
+    conditions = []
+    if since is not None:
+        conditions.append(RECENT_SINCE_CONDITION)
+    if until is not None:
+        conditions.append(RECENT_UNTIL_CONDITION)
+    where = f"WHERE {' AND '.join(conditions)} " if conditions else ""
+    return RECENT_CLAIMS_MATCH + where + RECENT_CLAIMS_RETURN
 
 
 def _ask_error(message: str) -> dict:
@@ -170,11 +199,19 @@ def create_app(
         return {"entities": entities, "events": events}
 
     @app.get("/recent")
-    def recent(limit: int = 500) -> dict:
+    def recent(limit: int = 500, until: str | None = None, since: str | None = None) -> dict:
         capped_limit = max(1, min(limit, 1000))
+        params: dict = {"limit": capped_limit}
+        normalized_since = _parse_window_param("since", since)
+        normalized_until = _parse_window_param("until", until)
+        if normalized_since is not None:
+            params["since"] = normalized_since
+        if normalized_until is not None:
+            params["until"] = normalized_until
+        query = _recent_claims_query(normalized_since, normalized_until)
         try:
             with app.state.driver.session() as session:
-                result = session.run(RECENT_CLAIMS_QUERY, limit=capped_limit)
+                result = session.run(query, **params)
                 claims = [
                     {"subject": r["subject"], "relation": r["relation"], "object": r["object"]}
                     for r in result

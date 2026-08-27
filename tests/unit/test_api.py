@@ -151,6 +151,90 @@ def test_recent_limit_is_floored_at_1_for_negative():
     assert driver.session_instance.calls[-1][1]["limit"] == 1
 
 
+def test_recent_without_params_runs_the_unmodified_recent_claims_query():
+    driver = FakeDriver()
+    client = TestClient(create_app(driver=driver, start_consumer=False))
+
+    response = client.get("/recent")
+
+    assert response.status_code == 200
+    query, kwargs = driver.session_instance.calls[-1]
+    assert query == api_main.RECENT_CLAIMS_QUERY
+    assert kwargs == {"limit": 500}
+
+
+def test_recent_until_adds_where_clause_and_normalized_param():
+    driver = FakeDriver()
+    client = TestClient(create_app(driver=driver, start_consumer=False))
+
+    response = client.get("/recent?until=2026-08-25T14:00:00Z")
+
+    assert response.status_code == 200
+    query, kwargs = driver.session_instance.calls[-1]
+    assert "WHERE ev.observed_at <= datetime($until)" in query
+    assert query.endswith("ORDER BY ev.observed_at DESC LIMIT $limit")
+    assert kwargs["until"] == "2026-08-25T14:00:00+00:00"
+    assert kwargs["limit"] == 500
+    assert "since" not in kwargs
+
+
+def test_recent_since_adds_where_clause_and_normalized_param():
+    driver = FakeDriver()
+    client = TestClient(create_app(driver=driver, start_consumer=False))
+
+    response = client.get("/recent?since=2026-08-20T00:00:00")
+
+    assert response.status_code == 200
+    query, kwargs = driver.session_instance.calls[-1]
+    assert "WHERE ev.observed_at >= datetime($since)" in query
+    assert query.endswith("ORDER BY ev.observed_at DESC LIMIT $limit")
+    assert kwargs["since"] == "2026-08-20T00:00:00"
+    assert kwargs["limit"] == 500
+    assert "until" not in kwargs
+
+
+def test_recent_since_and_until_are_anded_with_both_params():
+    driver = FakeDriver()
+    client = TestClient(create_app(driver=driver, start_consumer=False))
+
+    response = client.get("/recent?since=2026-08-20T00:00:00Z&until=2026-08-25T14:00:00Z")
+
+    assert response.status_code == 200
+    query, kwargs = driver.session_instance.calls[-1]
+    assert (
+        "WHERE ev.observed_at >= datetime($since) AND ev.observed_at <= datetime($until)" in query
+    )
+    assert kwargs["since"] == "2026-08-20T00:00:00+00:00"
+    assert kwargs["until"] == "2026-08-25T14:00:00+00:00"
+
+
+def test_recent_ignores_invalid_until_with_a_warning(caplog):
+    driver = FakeDriver()
+    client = TestClient(create_app(driver=driver, start_consumer=False))
+
+    with caplog.at_level("WARNING"):
+        response = client.get("/recent?until=not-a-date")
+
+    assert response.status_code == 200
+    query, kwargs = driver.session_instance.calls[-1]
+    assert query == api_main.RECENT_CLAIMS_QUERY
+    assert kwargs == {"limit": 500}
+    assert any("until" in r.message.lower() for r in caplog.records)
+
+
+def test_recent_until_composes_with_limit_clamp():
+    driver = FakeDriver()
+    client = TestClient(create_app(driver=driver, start_consumer=False))
+
+    response = client.get("/recent?until=2026-08-25T14:00:00Z&limit=5000")
+
+    assert response.status_code == 200
+    query, kwargs = driver.session_instance.calls[-1]
+    assert "WHERE ev.observed_at <= datetime($until)" in query
+    assert kwargs["limit"] == 1000
+    assert kwargs["until"] == "2026-08-25T14:00:00+00:00"
+
+
 def test_recent_survives_neo4j_failure_and_returns_empty_claims(caplog):
     client = TestClient(create_app(driver=FailingDriver(), start_consumer=False))
 
