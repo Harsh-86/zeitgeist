@@ -60,22 +60,25 @@ def make_question(**overrides):
 def test_run_question_happy_path_passes():
     agent = FakeAgent(["MATCH (s:Entity) RETURN s.name LIMIT 5"])
     session = FakeSession([[{"s.name": "GERMANY"}, {"s.name": "GERMANY OFFICIALS"}]])
-    result = runner.run_question(agent, session, make_question())
+    result, records = runner.run_question(agent, session, make_question())
     assert result.passed is True
     assert result.records_count == 2
     assert result.llm_calls == 1
     assert result.failures == ()
     assert result.cypher == "MATCH (s:Entity) RETURN s.name LIMIT 5"
+    # executed records come back for the faithfulness suite to reuse
+    assert records == [{"s.name": "GERMANY"}, {"s.name": "GERMANY OFFICIALS"}]
 
 
 def test_run_question_validator_reject_fails_without_retry():
     agent = FakeAgent(["MERGE (n:Entity {name: 'X'}) RETURN n"])
     session = FakeSession([])
-    result = runner.run_question(agent, session, make_question())
+    result, records = runner.run_question(agent, session, make_question())
     assert result.passed is False
     assert result.cypher is None
     assert result.records_count == 0
     assert result.llm_calls == 1
+    assert records == []
     assert len(agent.calls) == 1  # production shape: no retry on unsafe generation
     assert any("unsafe" in f or "unparseable" in f for f in result.failures)
 
@@ -85,9 +88,10 @@ def test_run_question_generation_none_fails():
         def generate_cypher(self, question, error_feedback=None):
             return None, {}
 
-    result = runner.run_question(NoneAgent(), FakeSession([]), make_question())
+    result, records = runner.run_question(NoneAgent(), FakeSession([]), make_question())
     assert result.passed is False
     assert result.cypher is None
+    assert records == []
 
 
 def test_run_question_execute_raises_then_retry_succeeds():
@@ -95,10 +99,11 @@ def test_run_question_execute_raises_then_retry_succeeds():
         ["MATCH (a) RETURN a.name LIMIT 5", "MATCH (b:Entity) RETURN b.name LIMIT 5"]
     )
     session = FakeSession([RuntimeError("boom: unknown function"), [{"b.name": "GERMANY"}]])
-    result = runner.run_question(agent, session, make_question())
+    result, records = runner.run_question(agent, session, make_question())
     assert result.passed is True
     assert result.llm_calls == 2
     assert result.cypher == "MATCH (b:Entity) RETURN b.name LIMIT 5"
+    assert records == [{"b.name": "GERMANY"}]
     # retry carried error feedback with the failing cypher and the error text
     _, feedback = agent.calls[1]
     assert "boom" in feedback
@@ -108,26 +113,29 @@ def test_run_question_execute_raises_then_retry_succeeds():
 def test_run_question_retry_also_raises_fails():
     agent = FakeAgent(["MATCH (a) RETURN a LIMIT 5", "MATCH (b) RETURN b LIMIT 5"])
     session = FakeSession([RuntimeError("boom1"), RuntimeError("boom2")])
-    result = runner.run_question(agent, session, make_question())
+    result, records = runner.run_question(agent, session, make_question())
     assert result.passed is False
     assert result.llm_calls == 2
+    assert records == []
     assert any("execution failed" in f for f in result.failures)
 
 
 def test_run_question_retry_generates_unsafe_fails():
     agent = FakeAgent(["MATCH (a) RETURN a LIMIT 5", "DELETE everything"])
     session = FakeSession([RuntimeError("boom")])
-    result = runner.run_question(agent, session, make_question())
+    result, records = runner.run_question(agent, session, make_question())
     assert result.passed is False
     assert result.llm_calls == 2
+    assert records == []
 
 
 def test_run_question_grade_failure_path():
     agent = FakeAgent(["MATCH (s:Entity) RETURN s.name LIMIT 5"])
     session = FakeSession([[{"s.name": "FRANCE"}]])
-    result = runner.run_question(agent, session, make_question())
+    result, records = runner.run_question(agent, session, make_question())
     assert result.passed is False
     assert result.records_count == 1
+    assert records == [{"s.name": "FRANCE"}]
     assert any("GERMANY" in f for f in result.failures)
 
 
@@ -147,20 +155,39 @@ def test_summarize_results_pass_rate_and_llm_calls():
 
 
 def test_threshold_exit_no_file(tmp_path):
-    assert runner.threshold_exit_code(0.5, tmp_path / "missing.json") == 0
+    rates = {"retrieval_pass_rate": 0.5}
+    assert runner.threshold_exit_code(rates, tmp_path / "missing.json") == 0
 
 
 def test_threshold_exit_below_floor(tmp_path):
     path = tmp_path / "thresholds.json"
     path.write_text('{"retrieval_pass_rate": 0.8}')
-    assert runner.threshold_exit_code(0.75, path) == 1
-    assert runner.threshold_exit_code(0.8, path) == 0
+    assert runner.threshold_exit_code({"retrieval_pass_rate": 0.75}, path) == 1
+    assert runner.threshold_exit_code({"retrieval_pass_rate": 0.8}, path) == 0
 
 
-def test_threshold_exit_file_without_key(tmp_path):
+def test_threshold_exit_file_without_matching_key(tmp_path):
     path = tmp_path / "thresholds.json"
     path.write_text('{"faithfulness_rate": 0.8}')
-    assert runner.threshold_exit_code(0.1, path) == 0
+    assert runner.threshold_exit_code({"retrieval_pass_rate": 0.1}, path) == 0
+
+
+def test_threshold_exit_faithfulness_floor(tmp_path):
+    path = tmp_path / "thresholds.json"
+    path.write_text('{"faithfulness_rate": 0.9}')
+    assert runner.threshold_exit_code({"faithfulness_rate": 0.85}, path) == 1
+    assert runner.threshold_exit_code({"faithfulness_rate": 0.9}, path) == 0
+
+
+def test_threshold_exit_either_breach_fails(tmp_path):
+    path = tmp_path / "thresholds.json"
+    path.write_text('{"retrieval_pass_rate": 0.8, "faithfulness_rate": 0.9}')
+    both_ok = {"retrieval_pass_rate": 0.9, "faithfulness_rate": 0.95}
+    faith_low = {"retrieval_pass_rate": 0.9, "faithfulness_rate": 0.5}
+    retrieval_low = {"retrieval_pass_rate": 0.5, "faithfulness_rate": 0.95}
+    assert runner.threshold_exit_code(both_ok, path) == 0
+    assert runner.threshold_exit_code(faith_low, path) == 1
+    assert runner.threshold_exit_code(retrieval_low, path) == 1
 
 
 # --- golden data: schema-valid ----------------------------------------------------
@@ -274,3 +301,40 @@ def test_every_golden_expectation_is_satisfiable_against_the_seed():
 
     # R26: count question — the expected exact count matches GERMANY's today count
     assert rows["R26"]["count_equals"] == summary["GERMANY"]["today"]
+
+
+def test_run_faithfulness_survives_one_exploding_question():
+    """One malformed response fails one question as a judge_error; the run
+    and every other verdict survive."""
+    from zeitgeist.evals.runner import QuestionResult, run_faithfulness
+
+    class ExplodingOnFirstAgent:
+        def __init__(self):
+            self.calls = 0
+
+        def synthesize(self, question, records):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("malformed response object")
+            return "fine answer", {}
+
+    class AlwaysSupportedJudge:
+        def judge(self, question, records, answer):
+            from zeitgeist.evals.faithfulness import FaithfulnessVerdict
+
+            return FaithfulnessVerdict(True, (), 0.9), {}
+
+    def qr(qid):
+        return QuestionResult(
+            id=qid, question=f"q {qid}", passed=True, cypher="MATCH", records_count=1,
+            failures=(), llm_calls=1,
+        )
+
+    results = run_faithfulness(
+        ExplodingOnFirstAgent(), AlwaysSupportedJudge(), [(qr("F1"), [{}]), (qr("F2"), [{}])]
+    )
+
+    assert len(results) == 2
+    assert results[0].supported is None
+    assert "unexpected exception" in results[0].failures[0]
+    assert results[1].supported is True
