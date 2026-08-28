@@ -90,6 +90,19 @@ class RaisesIfCalledExtractor:
         raise AssertionError("extractor.extract should not have been called")
 
 
+class RecordingArchive:
+    def __init__(self):
+        self.records = []
+
+    def record(self, event, article_text, llm_claims, usage):
+        self.records.append((event, article_text, llm_claims, usage))
+
+
+class RaisesIfCalledArchive:
+    def record(self, event, article_text, llm_claims, usage):
+        raise AssertionError("archive.record should not have been called")
+
+
 ONE_CLAIM = [LlmClaim(subject="A", relation="R", object="B", detail="d", confidence=1.0)]
 USAGE = {"input_tokens": 10, "output_tokens": 5, "cache_read_input_tokens": 0}
 
@@ -220,6 +233,129 @@ def test_usage_log_handles_missing_usage_keys(caplog):
         process_event(event.to_json(), ok_html_client(), extractor, AlwaysUnderBudget(), produce)
 
     assert any("llm call: in=0 out=0 cached=0" in record.message for record in caplog.records)
+
+
+# ---- process_event: extraction archiving ----
+
+
+def test_archive_records_on_successful_extraction(caplog):
+    event = make_event()
+    _, produce = recording_produce()
+    extractor = FakeExtractor(llm_claims=ONE_CLAIM, usage=USAGE)
+    archive = RecordingArchive()
+
+    disposition = process_event(
+        event.to_json(), ok_html_client(), extractor, AlwaysUnderBudget(), produce, archive
+    )
+
+    assert disposition == "extracted"
+    assert len(archive.records) == 1
+    archived_event, article_text, llm_claims, usage = archive.records[0]
+    assert archived_event == event
+    assert "Central Bank Raises Rates" in article_text
+    assert llm_claims == ONE_CLAIM
+    assert usage == USAGE
+
+
+def test_archive_records_on_zero_claims_success():
+    """Negatives are labeling gold: an empty-claims extraction is still archived."""
+    event = make_event()
+    _, produce = recording_produce()
+    extractor = FakeExtractor(llm_claims=[], usage=USAGE)
+    archive = RecordingArchive()
+
+    disposition = process_event(
+        event.to_json(), ok_html_client(), extractor, AlwaysUnderBudget(), produce, archive
+    )
+
+    assert disposition == "no_claims"
+    assert len(archive.records) == 1
+    assert archive.records[0][2] == []
+
+
+def test_archive_not_called_on_swallowed_api_error():
+    """extract() returns ([], {}) when it swallows an APIError — the call never
+    completed, so nothing may be archived (would pollute the golden substrate)."""
+    event = make_event()
+    _, produce = recording_produce()
+    extractor = FakeExtractor(llm_claims=[], usage={})
+
+    disposition = process_event(
+        event.to_json(),
+        ok_html_client(),
+        extractor,
+        AlwaysUnderBudget(),
+        produce,
+        RaisesIfCalledArchive(),
+    )
+
+    assert disposition == "no_claims"
+
+
+def test_archive_not_called_on_fetch_failure():
+    event = make_event()
+    _, produce = recording_produce()
+
+    disposition = process_event(
+        event.to_json(),
+        failing_client(),
+        RaisesIfCalledExtractor(),
+        RaisesIfCalledBudget(),
+        produce,
+        RaisesIfCalledArchive(),
+    )
+
+    assert disposition == "fetch_failed"
+
+
+def test_archive_not_called_on_budget_denial():
+    event = make_event()
+    _, produce = recording_produce()
+
+    disposition = process_event(
+        event.to_json(),
+        ok_html_client(),
+        RaisesIfCalledExtractor(),
+        AlwaysExhausted(),
+        produce,
+        RaisesIfCalledArchive(),
+    )
+
+    assert disposition == "budget_exhausted"
+
+
+def test_main_builds_archive_from_settings(monkeypatch):
+    monkeypatch.setenv("LLM_ARCHIVE_DIR", "/state/llm_archive")
+    built = []
+    monkeypatch.setattr(
+        llm_main, "ExtractionArchive", lambda dir_path: built.append(dir_path) or object()
+    )
+    _run_main_one_iteration(monkeypatch)
+    assert built == ["/state/llm_archive"]
+
+
+def test_process_one_threads_archive_through_to_process_event():
+    event = make_event()
+    order = []
+    producer = RecordingProducer(order)
+    consumer = RecordingConsumer(order)
+    message = FakeMessage(value=event.to_json(), key=b"k", error=None)
+    extractor = FakeExtractor(llm_claims=ONE_CLAIM, usage=USAGE)
+    archive = RecordingArchive()
+
+    disposition = process_one(
+        ok_html_client(),
+        extractor,
+        AlwaysUnderBudget(),
+        producer,
+        consumer,
+        message,
+        {},
+        archive,
+    )
+
+    assert disposition == "extracted"
+    assert len(archive.records) == 1
 
 
 # ---- process_one: commit-after-flush ordering ----

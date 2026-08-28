@@ -3,6 +3,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 jobs:
   lint-and-unit:
@@ -23,6 +24,36 @@ jobs:
       - run: uv sync
       - run: uv run pytest tests/integration -q -m integration
 
+  evals:
+    # Prompt-accuracy gate: live eval run (Neo4j testcontainer + real Haiku calls,
+    # ~$0.23) against the committed floors in evals/thresholds.json. Gates PRs that
+    # touch prompt/eval files; runnable on demand via workflow_dispatch. Deliberately
+    # NOT in deploy's needs — deploy is push-to-main, this gates PRs.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        if: github.event_name == 'pull_request'
+        with:
+          filters: |
+            prompts:
+              - src/zeitgeist/llm/extract.py
+              - src/zeitgeist/agent/query.py
+              - src/zeitgeist/resolver/judge.py
+              - 'src/zeitgeist/evals/**'
+              - 'evals/**'
+      - uses: astral-sh/setup-uv@v5
+        if: github.event_name == 'workflow_dispatch' || steps.filter.outputs.prompts == 'true'
+      - run: uv sync
+        if: github.event_name == 'workflow_dispatch' || steps.filter.outputs.prompts == 'true'
+      - run: uv run python -m zeitgeist.evals.runner --suite all
+        if: github.event_name == 'workflow_dispatch' || steps.filter.outputs.prompts == 'true'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
   deploy:
     runs-on: ubuntu-latest
     # Production deploy: only on direct pushes to main, only after all tests pass.
@@ -40,7 +71,7 @@ jobs:
         run: |
           rsync -az --delete -e "ssh -i ~/.ssh/deploy_key" \
             --exclude .git --exclude .venv --exclude .pytest_cache --exclude .ruff_cache \
-            --exclude state --exclude data \
+            --exclude state --exclude data --exclude evals \
             --exclude docs --exclude .superpowers --exclude .claude --exclude .env \
             ./ "root@${{ secrets.DEPLOY_HOST }}:/root/zeitgeist/"
           ssh -i ~/.ssh/deploy_key "root@${{ secrets.DEPLOY_HOST }}" \

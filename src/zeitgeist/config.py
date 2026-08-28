@@ -22,6 +22,7 @@ class Settings:
     llm_budget_state_path: str
     anthropic_api_key: str
     llm_model: str
+    llm_archive_dir: str
     er_max_calls_per_day: int
     er_budget_state_path: str
     resolver_interval_seconds: int
@@ -51,6 +52,7 @@ class Settings:
             ),
             anthropic_api_key=os.getenv("ANTHROPIC_API_KEY", ""),
             llm_model=os.getenv("LLM_MODEL", "claude-haiku-4-5"),
+            llm_archive_dir=os.getenv("LLM_ARCHIVE_DIR", ""),
             er_max_calls_per_day=int(os.getenv("ER_MAX_CALLS_PER_DAY", "100")),
             er_budget_state_path=os.getenv("ER_BUDGET_STATE_PATH", "state/er_budget.json"),
             resolver_interval_seconds=int(os.getenv("RESOLVER_INTERVAL_SECONDS", "3600")),

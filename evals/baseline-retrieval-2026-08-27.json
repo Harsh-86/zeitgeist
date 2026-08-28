@@ -1,0 +1,296 @@
+{
+  "suite": "retrieval",
+  "model": "claude-haiku-4-5",
+  "ran_at": "2026-08-27T23:44:50.923671+00:00",
+  "total": 26,
+  "passed": 3,
+  "pass_rate": 0.11538461538461539,
+  "llm_calls": 26,
+  "questions": [
+    {
+      "id": "R01",
+      "question": "What happened around GERMANY today?",
+      "passed": false,
+      "cypher": "MATCH (s:Entity)-[:ACTOR1_IN]->(ev:Event) OPTIONAL MATCH (ev:Event)-[:ACTOR2]->(o:Entity) WHERE (s.name = 'GERMANY' OR o.name = 'GERMANY') AND ev.observed_at >= datetime() - duration('P1D') RETURN s.name, ev.relation, o.name, ev.detail, ev.observed_at, ev.source_url ORDER BY ev.observed_at DESC LIMIT 50",
+      "records_count": 50,
+      "failures": [
+        "all_records_mention: 42/50 records do not mention 'GERMANY' (first offender: record 1)"
+      ],
+      "llm_calls": 1
+    },
+    {
+      "id": "R02",
+      "question": "What are the latest events involving UKRAINE?",
+      "passed": false,
+      "cypher": "MATCH (s:Entity)-[:ACTOR1_IN]->(ev:Event) OPTIONAL MATCH (ev:Event)-[:ACTOR2]->(o:Entity) WHERE (s.name = 'UKRAINE' OR o.name = 'UKRAINE') RETURN s.name, ev.relation, o.name, ev.detail, ev.observed_at, ev.source_url ORDER BY ev.observed_at DESC LIMIT 50",
+      "records_count": 50,
+      "failures": [
+        "all_records_mention: 41/50 records do not mention 'UKRAINE' (first offender: record 0)"
+      ],
+      "llm_calls": 1
+    },
+    {
+      "id": "R03",
+      "question": "What happened around GERMANY this week?",
+      "passed": false,
+      "cypher": "MATCH (s:Entity)-[:ACTOR1_IN]->(ev:Event) OPTIONAL MATCH (ev:Event)-[:ACTOR2]->(o:Entity) WHERE (s.name = 'GERMANY' OR o.name = 'GERMANY') AND ev.observed_at >= datetime() - duration('P7D') RETURN s.name, ev.relation, o.name, ev.detail, ev.observed_at, ev.source_url ORDER BY ev.observed_at DESC LIMIT 50",
+      "records_count": 50,
+      "failures": [
+        "all_records_mention: 42/50 records do not mention 'GERMANY' (first offender: record 1)"
+      ],
+      "llm_calls": 1
+    },
+    {
+      "id": "R04",
+      "question": "What happened around FRANCE today?",
+      "passed": false,
+      "cypher": "MATCH (s:Entity)-[:ACTOR1_IN]->(ev:Event) OPTIONAL MATCH (ev:Event)-[:ACTOR2]->(o:Entity) WHERE (s.name = 'FRANCE' OR o.name = 'FRANCE') AND ev.observed_at >= datetime() - duration('P1D') RETURN s.name, ev.relation, o.name, ev.detail, ev.observed_at, ev.source_url ORDER BY ev.observed_at DESC LIMIT 25",
+      "records_count": 25,
+      "failures": [
+        "all_records_mention: 20/25 records do not mention 'FRANCE' (first offender: record 1)"
+      ],
+      "llm_calls": 1
+    },
+    {
+      "id": "R05",
+      "question": "What events connect GERMANY and FRANCE?",
+      "passed": true,
+      "cypher": "MATCH (s:Entity)-[:ACTOR1_IN]->(ev:Event)-[:ACTOR2]->(o:Entity) WHERE (s.name = 'GERMANY' AND o.name = 'FRANCE') OR (s.name = 'FRANCE' AND o.name = 'GERMANY') RETURN s.name, ev.relation, o.name, ev.detail, ev.observed_at, ev.source_url ORDER BY ev.observed_at DESC LIMIT 50",
+      "records_count": 5,
+      "failures": [],
+      "llm_calls": 1
+    },
+    {
+      "id": "R06",
+      "question": "What events involving ECB were observed today?",
+      "passed": false,
+      "cypher": "MATCH (s:Entity)-[:ACTOR1_IN]->(ev:Event) OPTIONAL MATCH (ev:Event)-[:ACTOR2]->(o:Entity) WHERE (s.name = 'ECB' OR o.name = 'ECB') AND ev.observed_at >= datetime() - duration('P1D') RETURN s.name, ev.relation, o.name, ev.detail, ev.observed_at, ev.source_url ORDER BY ev.observed_at DESC LIMIT 50",
+      "records_count": 50,
+      "failures": [
+        "max_records: expected at most 0 records, got 50",
+        "all_records_mention: 50/50 records do not mention 'ECB' (first offender: record 0)"
+      ],
+      "llm_calls": 1
+    },
+    {
+      "id": "R07",
+      "question": "What happened around ECB this week?",
+      "passed": false,
+      "cypher": "MATCH (s:Entity)-[:ACTOR1_IN]->(ev:Event) OPTIONAL MATCH (ev:Event)-[:ACTOR2]->(o:Entity) WHERE (s.name = 'ECB' OR o.name = 'ECB') AND ev.observed_at >= datetime() - duration('P7D') RETURN s.name, ev.relation, o.name, ev.detail, ev.observed_at, ev.source_url ORDER BY ev.observed_at DESC LIMIT 50",
+      "records_count": 50,
+      "failures": [
+        "all_records_mention: 50/50 records do not mention 'ECB' (first offender: record 0)"
+      ],
+      "llm_calls": 1
+    },
+    {
+      "id": "R08",
+      "question": "What events involve BHUTAN?",
+      "passed": false,
+      "cypher": "MATCH (s:Entity)-[:ACTOR1_IN]->(ev:Event) OPTIONAL MATCH (ev:Event)-[:ACTOR2]->(o:Entity) WHERE s.name = 'BHUTAN' OR o.name = 'BHUTAN' RETURN s.name, ev.relation, coalesce(o.name, 'N/A') AS object, ev.detail, ev.observed_at, ev.source_url ORDER BY ev.observed_at DESC LIMIT 50",
+      "records_count": 50,
+      "failures": [
+        "max_records: expected at most 1 records, got 50",
+        "all_records_mention: 50/50 records do not mention 'BHUTAN' (first offender: record 0)"
+      ],
+      "llm_calls": 1
+    },
+    {
+      "id": "R09",
+      "question": "What happened around BHUTAN today?",
+      "passed": false,
+      "cypher": "MATCH (s:Entity)-[:ACTOR1_IN]->(ev:Event) OPTIONAL MATCH (ev:Event)-[:ACTOR2]->(o:Entity) WHERE (s.name = 'BHUTAN' OR o.name = 'BHUTAN') AND ev.observed_at >= datetime() - duration('P1D') RETURN s.name, ev.relation, o.name, ev.detail, ev.observed_at, ev.source_url ORDER BY ev.observed_at DESC LIMIT 50",
+      "records_count": 50,
+      "failures": [
+        "max_records: expected at most 0 records, got 50",
+        "all_records_mention: 50/50 records do not mention 'BHUTAN' (first offender: record 0)"
+      ],
+      "llm_calls": 1
+    },
+    {
+      "id": "R10",
+      "question": "What has NATO been doing this week?",
+      "passed": false,
+      "cypher": "MATCH (s:Entity)-[:ACTOR1_IN]->(ev:Event) OPTIONAL MATCH (ev:Event)-[:ACTOR2]->(o:Entity) WHERE s.name = 'NATO' AND ev.observed_at >= datetime() - duration('P7D') RETURN s.name, ev.relation, o.name, ev.detail, ev.observed_at, ev.source_url ORDER BY ev.observed_at DESC LIMIT 50",
+      "records_count": 50,
+      "failures": [
+        "all_records_mention: 45/50 records do not mention 'NATO' (first offender: record 0)"
+      ],
+      "llm_calls": 1
+    },
+    {
+      "id": "R11",
+      "question": "What happened around the UNITED STATES today?",
+      "passed": false,
+      "cypher": "MATCH (s:Entity)-[:ACTOR1_IN]->(ev:Event) OPTIONAL MATCH (ev:Event)-[:ACTOR2]->(o:Entity) WHERE (s.name = 'UNITED STATES' OR o.name = 'UNITED STATES') AND ev.observed_at >= datetime() - duration('P1D') RETURN s.name, ev.relation, o.name, ev.detail, ev.observed_at, ev.source_url ORDER BY ev.observed_at DESC LIMIT 25",
+      "records_count": 25,
+      "failures": [
+        "all_records_mention: 10/25 records do not mention 'UNITED STATES' (first offender: record 0)"
+      ],
+      "llm_calls": 1
+    },
+    {
+      "id": "R12",
+      "question": "What happened around the EU recently?",
+      "passed": false,
+      "cypher": "MATCH (s:Entity)-[:ACTOR1_IN]->(ev:Event) OPTIONAL MATCH (ev:Event)-[:ACTOR2]->(o:Entity) WHERE (s.name = 'EU' OR o.name = 'EU') AND ev.observed_at >= datetime() - duration('P7D') RETURN s.name, ev.relation, o.name, ev.detail, ev.observed_at, ev.source_url ORDER BY ev.observed_at DESC LIMIT 50",
+      "records_count": 50,
+      "failures": [
+        "all_records_mention: 47/50 records do not mention 'EU' (first offender: record 0)"
+      ],
+      "llm_calls": 1
+    },
+    {
+      "id": "R13",
+      "question": "What detailed facts are known about GERMANY's activities?",
+      "passed": false,
+      "cypher": "MATCH (s:Entity)-[:ACTOR1_IN]->(ev:Event) OPTIONAL MATCH (ev:Event)-[:ACTOR2]->(o:Entity) WHERE s.name = 'GERMANY' AND ev.detail IS NOT NULL RETURN s.name, ev.relation, o.name, ev.detail, ev.occurred_on, ev.observed_at, ev.source_url ORDER BY ev.observed_at DESC LIMIT 50",
+      "records_count": 50,
+      "failures": [
+        "all_records_mention: 44/50 records do not mention 'GERMANY' (first offender: record 1)"
+      ],
+      "llm_calls": 1
+    },
+    {
+      "id": "R14",
+      "question": "What details are recorded about actions the UNITED STATES has taken?",
+      "passed": false,
+      "cypher": "MATCH (s:Entity)-[:ACTOR1_IN]->(ev:Event) OPTIONAL MATCH (ev:Event)-[:ACTOR2]->(o:Entity) WHERE s.name = 'UNITED STATES' RETURN s.name, ev.relation, o.name, ev.detail, ev.observed_at, ev.source_url ORDER BY ev.observed_at DESC LIMIT 50",
+      "records_count": 50,
+      "failures": [
+        "all_records_mention: 27/50 records do not mention 'UNITED STATES' (first offender: record 0)"
+      ],
+      "llm_calls": 1
+    },
+    {
+      "id": "R15",
+      "question": "How many events involve BRAZIL in total?",
+      "passed": false,
+      "cypher": "MATCH (s:Entity)-[:ACTOR1_IN]->(ev:Event) OPTIONAL MATCH (ev:Event)-[:ACTOR2]->(o:Entity) WHERE s.name = 'BRAZIL' OR o.name = 'BRAZIL' RETURN count(DISTINCT ev) AS total_events LIMIT 1",
+      "records_count": 1,
+      "failures": [
+        "count_equals: expected an aggregate field exactly equal to 6 or exactly 6 raw rows, got 1 record(s)"
+      ],
+      "llm_calls": 1
+    },
+    {
+      "id": "R16",
+      "question": "What happened around RUSSIA today?",
+      "passed": false,
+      "cypher": "MATCH (s:Entity)-[:ACTOR1_IN]->(ev:Event) OPTIONAL MATCH (ev:Event)-[:ACTOR2]->(o:Entity) WHERE (s.name = 'RUSSIA' OR o.name = 'RUSSIA') AND ev.observed_at >= datetime() - duration('P1D') RETURN s.name, ev.relation, o.name, ev.detail, ev.observed_at, ev.source_url ORDER BY ev.observed_at DESC LIMIT 50",
+      "records_count": 50,
+      "failures": [
+        "all_records_mention: 42/50 records do not mention 'RUSSIA' (first offender: record 0)"
+      ],
+      "llm_calls": 1
+    },
+    {
+      "id": "R17",
+      "question": "What has CHINA been involved in this week?",
+      "passed": false,
+      "cypher": "MATCH (s:Entity)-[:ACTOR1_IN]->(ev:Event) OPTIONAL MATCH (ev:Event)-[:ACTOR2]->(o:Entity) WHERE (s.name = 'CHINA' OR o.name = 'CHINA') AND ev.observed_at >= datetime() - duration('P7D') RETURN s.name, ev.relation, o.name, ev.detail, ev.observed_at, ev.source_url ORDER BY ev.observed_at DESC LIMIT 50",
+      "records_count": 50,
+      "failures": [
+        "all_records_mention: 45/50 records do not mention 'CHINA' (first offender: record 0)"
+      ],
+      "llm_calls": 1
+    },
+    {
+      "id": "R18",
+      "question": "What happened around UKRAINE this week?",
+      "passed": false,
+      "cypher": "MATCH (s:Entity)-[:ACTOR1_IN]->(ev:Event) OPTIONAL MATCH (ev:Event)-[:ACTOR2]->(o:Entity) WHERE (s.name = 'UKRAINE' OR o.name = 'UKRAINE') AND ev.observed_at >= datetime() - duration('P7D') RETURN s.name, ev.relation, o.name, ev.detail, ev.observed_at, ev.source_url ORDER BY ev.observed_at DESC LIMIT 50",
+      "records_count": 50,
+      "failures": [
+        "all_records_mention: 41/50 records do not mention 'UKRAINE' (first offender: record 0)"
+      ],
+      "llm_calls": 1
+    },
+    {
+      "id": "R19",
+      "question": "What recent events link RUSSIA and UKRAINE?",
+      "passed": true,
+      "cypher": "MATCH (s:Entity)-[:ACTOR1_IN]->(ev:Event)-[:ACTOR2]->(o:Entity) WHERE (s.name = 'RUSSIA' AND o.name = 'UKRAINE') OR (s.name = 'UKRAINE' AND o.name = 'RUSSIA') AND ev.observed_at >= datetime() - duration('P7D') RETURN s.name, ev.relation, o.name, ev.detail, ev.observed_at, ev.source_url ORDER BY ev.observed_at DESC LIMIT 50",
+      "records_count": 2,
+      "failures": [],
+      "llm_calls": 1
+    },
+    {
+      "id": "R20",
+      "question": "What has POLAND been involved in?",
+      "passed": false,
+      "cypher": "MATCH (s:Entity)-[:ACTOR1_IN]->(ev:Event) OPTIONAL MATCH (ev:Event)-[:ACTOR2]->(o:Entity) WHERE s.name = 'POLAND' RETURN s.name, ev.relation, o.name, ev.detail, ev.observed_at, ev.source_url ORDER BY ev.observed_at DESC LIMIT 50",
+      "records_count": 50,
+      "failures": [
+        "all_records_mention: 49/50 records do not mention 'POLAND' (first offender: record 0)"
+      ],
+      "llm_calls": 1
+    },
+    {
+      "id": "R21",
+      "question": "What events involve GERMANY overall?",
+      "passed": false,
+      "cypher": "MATCH (s:Entity)-[:ACTOR1_IN]->(ev:Event) OPTIONAL MATCH (ev:Event)-[:ACTOR2]->(o:Entity) WHERE s.name = 'GERMANY' OR o.name = 'GERMANY' RETURN s.name, ev.relation, o.name, ev.detail, ev.observed_at, ev.source_url ORDER BY ev.observed_at DESC LIMIT 50",
+      "records_count": 50,
+      "failures": [
+        "max_records: expected at most 20 records, got 50",
+        "all_records_mention: 42/50 records do not mention 'GERMANY' (first offender: record 1)"
+      ],
+      "llm_calls": 1
+    },
+    {
+      "id": "R22",
+      "question": "What has EGYPT been involved in?",
+      "passed": false,
+      "cypher": "MATCH (s:Entity)-[:ACTOR1_IN]->(ev:Event) OPTIONAL MATCH (ev:Event)-[:ACTOR2]->(o:Entity) WHERE s.name = 'EGYPT' RETURN s.name, ev.relation, o.name, ev.detail, ev.observed_at, ev.source_url ORDER BY ev.observed_at DESC LIMIT 50",
+      "records_count": 50,
+      "failures": [
+        "all_records_mention: 50/50 records do not mention 'EGYPT' (first offender: record 0)"
+      ],
+      "llm_calls": 1
+    },
+    {
+      "id": "R23",
+      "question": "Which events involving JAPAN were observed in the last 24 hours?",
+      "passed": false,
+      "cypher": "MATCH (s:Entity)-[:ACTOR1_IN]->(ev:Event) OPTIONAL MATCH (ev:Event)-[:ACTOR2]->(o:Entity) WHERE (s.name = 'JAPAN' OR o.name = 'JAPAN') AND ev.observed_at >= datetime() - duration('P1D') RETURN s.name, ev.relation, o.name, ev.detail, ev.observed_at, ev.source_url ORDER BY ev.observed_at DESC LIMIT 50",
+      "records_count": 50,
+      "failures": [
+        "max_records: expected at most 5 records, got 50",
+        "all_records_mention: 48/50 records do not mention 'JAPAN' (first offender: record 0)"
+      ],
+      "llm_calls": 1
+    },
+    {
+      "id": "R24",
+      "question": "Which entities did the UNITED STATES meet with today?",
+      "passed": true,
+      "cypher": "MATCH (s:Entity)-[:ACTOR1_IN]->(ev:Event)-[:ACTOR2]->(o:Entity) WHERE (s.name = 'UNITED STATES' OR s.name CONTAINS 'UNITED STATES') AND ev.relation CONTAINS 'MEET' AND ev.observed_at >= datetime() - duration('P1D') RETURN s.name, ev.relation, o.name, ev.detail, ev.observed_at, ev.source_url ORDER BY ev.observed_at DESC LIMIT 50",
+      "records_count": 1,
+      "failures": [],
+      "llm_calls": 1
+    },
+    {
+      "id": "R25",
+      "question": "What details are recorded about NIGERIA?",
+      "passed": false,
+      "cypher": "MATCH (s:Entity)-[:ACTOR1_IN]->(ev:Event) OPTIONAL MATCH (ev:Event)-[:ACTOR2]->(o:Entity) WHERE s.name = 'NIGERIA' OR o.name = 'NIGERIA' RETURN s.name, ev.relation, o.name, ev.detail, ev.occurred_on, ev.observed_at, ev.source_url, ev.confidence, ev.tone, ev.goldstein ORDER BY ev.observed_at DESC LIMIT 50",
+      "records_count": 50,
+      "failures": [
+        "all_records_mention: 48/50 records do not mention 'NIGERIA' (first offender: record 0)"
+      ],
+      "llm_calls": 1
+    },
+    {
+      "id": "R26",
+      "question": "How many events involved GERMANY today?",
+      "passed": false,
+      "cypher": "MATCH (s:Entity)-[:ACTOR1_IN]->(ev:Event) OPTIONAL MATCH (ev:Event)-[:ACTOR2]->(o:Entity) WHERE (s.name = 'GERMANY' OR o.name = 'GERMANY') AND ev.observed_at >= datetime() - duration('P1D') RETURN count(ev) AS event_count LIMIT 50",
+      "records_count": 1,
+      "failures": [
+        "count_equals: expected an aggregate field exactly equal to 8 or exactly 8 raw rows, got 1 record(s)"
+      ],
+      "llm_calls": 1
+    }
+  ]
+}

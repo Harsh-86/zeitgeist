@@ -17,6 +17,7 @@ from zeitgeist.articles.fetch import fetch_article_text
 from zeitgeist.budget import DailyBudget
 from zeitgeist.config import CLAIMS_TOPIC, LLM_TOPIC, Settings
 from zeitgeist.kafka_utils import make_consumer, make_producer
+from zeitgeist.llm.archive import ExtractionArchive
 from zeitgeist.llm.extract import LlmExtractor, claims_from_llm
 from zeitgeist.metrics import get_counter, start_metrics_server
 from zeitgeist.models import GdeltEvent
@@ -47,12 +48,15 @@ def process_event(
     extractor: LlmExtractor,
     budget: DailyBudget,
     produce: Callable[[bytes], None],
+    archive: ExtractionArchive | None = None,
 ) -> str:
     """Handle one llm.queue message. Returns a disposition string for logging/metrics.
 
-    Order: decode -> fetch -> budget -> extract -> produce. A free failure (bad
-    JSON, missing URL, fetch error) never touches the budget; only a successful
-    fetch is allowed to spend it, right before the LLM call it's guarding.
+    Order: decode -> fetch -> budget -> extract -> archive -> produce. A free
+    failure (bad JSON, missing URL, fetch error) never touches the budget; only
+    a successful fetch is allowed to spend it, right before the LLM call it's
+    guarding. Every extract call is archived (fire-and-forget) — including
+    zero-claims results, which are labeling gold for the extraction evals.
     """
     try:
         event = GdeltEvent.from_json(raw)
@@ -82,6 +86,12 @@ def process_event(
     LLM_CACHED_TOKENS_TOTAL.inc(cached_tokens)
     logger.info("llm call: in=%d out=%d cached=%d", input_tokens, output_tokens, cached_tokens)
 
+    # Empty usage means extract() swallowed an APIError — the call never
+    # completed, so there is nothing to archive: writing it would pollute the
+    # golden-label substrate with rows indistinguishable from real negatives.
+    if archive is not None and usage:
+        archive.record(event, article_text, llm_claims, usage)
+
     if not llm_claims:
         return "no_claims"
 
@@ -99,6 +109,7 @@ def process_one(
     consumer,
     message,
     dispositions: dict[str, int],
+    archive: ExtractionArchive | None = None,
 ) -> str | None:
     """Handle a single polled message: extract, produce, flush, then commit.
 
@@ -112,7 +123,7 @@ def process_one(
     def produce(payload: bytes) -> None:
         producer.produce(CLAIMS_TOPIC, key=message.key(), value=payload)
 
-    disposition = process_event(message.value(), http, extractor, budget, produce)
+    disposition = process_event(message.value(), http, extractor, budget, produce, archive)
     undelivered = producer.flush(10)
     if undelivered > 0:
         logger.error(
@@ -146,6 +157,7 @@ def main() -> None:
     producer = make_producer(settings.kafka_bootstrap)
     http = httpx.Client(follow_redirects=True)
     budget = DailyBudget(Path(settings.llm_budget_state_path), settings.llm_max_calls_per_day)
+    archive = ExtractionArchive(settings.llm_archive_dir)
 
     dispositions: dict[str, int] = {}
     processed = 0
@@ -155,7 +167,7 @@ def main() -> None:
         if message is None:
             continue
         disposition = process_one(
-            http, extractor, budget, producer, consumer, message, dispositions
+            http, extractor, budget, producer, consumer, message, dispositions, archive
         )
         if disposition is None:
             continue

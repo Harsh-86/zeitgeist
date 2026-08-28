@@ -159,6 +159,8 @@ services:
       LLM_BUDGET_STATE_PATH: /state/llm_budget.json
       LLM_MAX_CALLS_PER_DAY: ${LLM_MAX_CALLS_PER_DAY:-400}
       LLM_MODEL: ${LLM_MODEL:-claude-haiku-4-5}
+      # Lands on the existing llm-state volume already mounted at /state below.
+      LLM_ARCHIVE_DIR: /state/llm_archive
     volumes:
       - llm-state:/state
     depends_on:
