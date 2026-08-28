@@ -151,6 +151,8 @@ class FaithfulnessJudge:
             response = self._client.messages.create(
                 model=self._model,
                 max_tokens=1024,
+                # Grading must be consistent run to run.
+                temperature=0.0,
                 system=[
                     {
                         "type": "text",
