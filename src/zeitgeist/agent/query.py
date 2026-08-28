@@ -230,10 +230,6 @@ class QueryAgent:
             response = self._client.messages.create(
                 model=self._model,
                 max_tokens=1024,
-                # Translation and grounded synthesis, not creative writing:
-                # temperature 0 removes run-to-run query-shape variance (the
-                # eval gate measured 100% vs 92% across identical prompts).
-                temperature=0.0,
                 system=[
                     {
                         "type": "text",

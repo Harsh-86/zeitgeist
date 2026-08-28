@@ -428,3 +428,26 @@ def test_synthesize_api_error_returns_none_and_empty_usage(caplog):
     assert answer is None
     assert usage == {}
     assert any(record.levelname == "WARNING" for record in caplog.records)
+
+
+# ---- installed-SDK signature compatibility ----
+
+
+def test_create_kwargs_are_accepted_by_the_installed_sdk():
+    """Fakes accept **kwargs, so a kwarg the real SDK rejects (e.g. the removed
+    `temperature`) sails through unit tests and explodes only against the live
+    API. Bind our exact call kwargs against the INSTALLED SDK's create()
+    signature so stale-knowledge kwargs fail right here."""
+    import inspect
+
+    from anthropic.resources.messages import Messages
+
+    client = FakeClient(response=_text_response("MATCH (n) RETURN n LIMIT 1"))
+    agent = QueryAgent(client, model="claude-haiku-4-5")
+    agent.generate_cypher("q")
+    agent.synthesize("q", [{"a": 1}])
+
+    allowed = set(inspect.signature(Messages.create).parameters) - {"self"}
+    for call in client.messages.calls:
+        unknown = set(call) - allowed
+        assert not unknown, f"kwargs not in installed SDK signature: {unknown}"

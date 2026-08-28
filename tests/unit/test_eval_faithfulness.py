@@ -517,3 +517,21 @@ def test_serialize_records_replica_truncates_at_caps():
     out = _serialize_records(big)
     assert out.endswith("...truncated")
     assert len(out.splitlines()) <= 51  # 50 records + marker
+
+
+def test_judge_create_kwargs_are_accepted_by_the_installed_sdk():
+    """Same guard as the query agent's: the judge's create() kwargs must bind
+    against the installed SDK signature, not just our permissive fakes."""
+    import inspect
+
+    from anthropic.resources.messages import Messages
+
+    verdict_json = '{"supported": true, "unsupported_claims": [], "confidence": 1.0}'
+    client = FakeClient(response=_text_response(verdict_json))
+    judge = FaithfulnessJudge(client, model="claude-haiku-4-5")
+    judge.judge("q", [{"a": 1}], "answer")
+
+    allowed = set(inspect.signature(Messages.create).parameters) - {"self"}
+    for call in client.messages.calls:
+        unknown = set(call) - allowed
+        assert not unknown, f"kwargs not in installed SDK signature: {unknown}"
