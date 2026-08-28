@@ -1,4 +1,4 @@
-.PHONY: test lint integration up down smoke frontend-dev
+.PHONY: test lint integration up down smoke frontend-dev evals
 
 test:  # unit tests only (fast, no Docker)
 	uv run pytest tests/unit -q
@@ -20,3 +20,6 @@ smoke:
 
 frontend-dev:  # hot-reload dev server; API calls proxy to localhost:8000 (make up)
 	cd frontend && npm run dev
+
+evals:  # full live eval run; needs Docker + ANTHROPIC_API_KEY
+	uv run python -m zeitgeist.evals.runner --suite all
