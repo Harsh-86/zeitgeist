@@ -1,9 +1,10 @@
 """Eval runner: real Cypher generation against a deterministic seeded graph in
 a throwaway Neo4j container, plus citation-faithfulness grading of the answers
-synthesized from those retrievals.
+synthesized from those retrievals, plus (once labeled golden data exists)
+extraction precision/recall over evals/golden_extraction.jsonl.
 
-    python -m zeitgeist.evals.runner --suite {retrieval,faithfulness,all}
-                                     [--golden PATH] [--limit N]
+    python -m zeitgeist.evals.runner --suite {retrieval,faithfulness,extraction,all}
+                                     [--golden PATH] [--golden-extraction PATH] [--limit N]
 
 Requires ANTHROPIC_API_KEY (exit 2 when unset) and Docker for the Neo4j
 testcontainer. Per question the retrieval leg mirrors production's /ask shape
@@ -16,6 +17,11 @@ reuses each retrieval question's executed records — only for questions whose
 retrieval PASSED (grading answer quality on garbage records is noise): it calls
 agent.synthesize, runs the deterministic citation/shape checks, then asks the
 FaithfulnessJudge for a per-question verdict.
+
+The extraction leg needs NO Neo4j container — only the API key and the golden
+file: `--suite extraction` alone never boots testcontainers, and when the
+golden file is absent or empty it exits 0 with a clear notice (`--suite all`
+prints the notice and simply skips the leg).
 """
 
 import argparse
@@ -28,6 +34,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from zeitgeist.agent.query import QueryAgent, validate_cypher
+from zeitgeist.evals.extraction import ItemResult, run_extraction, score_items
 from zeitgeist.evals.faithfulness import (
     FaithfulnessJudge,
     extract_urls,
@@ -40,6 +47,7 @@ from zeitgeist.evals.seed import seed_graph
 logger = logging.getLogger("zeitgeist.evals.runner")
 
 DEFAULT_GOLDEN = Path("evals/golden_questions.jsonl")
+DEFAULT_GOLDEN_EXTRACTION = Path("evals/golden_extraction.jsonl")
 RESULTS_DIR = Path("evals/results")
 THRESHOLDS_PATH = Path("evals/thresholds.json")
 DEFAULT_MODEL = "claude-haiku-4-5"
@@ -245,6 +253,30 @@ def summarize_faithfulness(results: list[FaithfulnessResult]) -> dict:
     }
 
 
+def load_extraction_rows(path: Path) -> list[dict] | None:
+    """The labeled extraction golden rows, or None (with a printed notice)
+    when the file is absent or empty — the extraction leg then doesn't run."""
+    if not path.exists():
+        print(f"extraction: no golden data ({path} missing)")
+        return None
+    rows = load_golden(path)
+    if not rows:
+        print(f"extraction: no golden data ({path} empty)")
+        return None
+    return rows
+
+
+def summarize_extraction(items: list[ItemResult]) -> dict:
+    """Aggregate the extraction leg: score_items' overall + per-relation
+    metrics, plus per-item detail and the llm-call count (one extract call
+    per item)."""
+    return {
+        **score_items(items),
+        "llm_calls": len(items),
+        "items": [asdict(item) for item in items],
+    }
+
+
 def format_line(result: QuestionResult) -> str:
     status = "PASS" if result.passed else "FAIL"
     line = (
@@ -272,6 +304,21 @@ def format_faithfulness_line(result: FaithfulnessResult) -> str:
         line += f"\n       - unsupported: {claim}"
     for failure in result.failures:
         line += f"\n       - {failure}"
+    return line
+
+
+def format_extraction_line(item: ItemResult) -> str:
+    if item.error is not None:
+        return f"[ERROR] {item.id}: {item.error}"
+    status = "PASS" if item.fp == 0 and item.fn == 0 else "MISS"
+    line = (
+        f"[{status}] {item.id}: tp={item.tp} fp={item.fp} fn={item.fn} "
+        f"(predicted {len(item.predicted)}, expected {len(item.expected)})"
+    )
+    for triple in item.unmatched_predicted:
+        line += f"\n       - false positive: {triple}"
+    for triple in item.unmatched_expected:
+        line += f"\n       - missed: {triple}"
     return line
 
 
@@ -331,6 +378,11 @@ def _md_escape(text: str) -> str:
     return str(text).replace("|", "\\|").replace("\n", " ")
 
 
+def _pct(value: float | None) -> str:
+    """Render a rate, or an em-dash for an undefined (zero-division) one."""
+    return f"{value:.2%}" if value is not None else "—"
+
+
 def parse_history_rows(markdown: str) -> list[str]:
     """Extract the data rows (verbatim `| ... |` lines, header and separator
     skipped) of the History table from an existing EVALS.md, so a new run can
@@ -357,7 +409,10 @@ def parse_history_rows(markdown: str) -> list[str]:
 
 def _history_row(summary: dict, notes: str) -> str:
     date = summary["ran_at"][:10]
-    retrieval = f"{summary['pass_rate']:.2%} ({summary['passed']}/{summary['total']})"
+    if "pass_rate" in summary:
+        retrieval = f"{summary['pass_rate']:.2%} ({summary['passed']}/{summary['total']})"
+    else:
+        retrieval = "—"
     faith = summary.get("faithfulness")
     if faith is not None:
         faith_cell = (
@@ -368,9 +423,49 @@ def _history_row(summary: dict, notes: str) -> str:
     return f"| {date} | {retrieval} | {faith_cell} | {_md_escape(notes)} |"
 
 
+def _extraction_section(extraction: dict) -> list[str]:
+    """The EVALS.md Extraction section rendered from a summarize_extraction
+    dict — replaces the pending-golden-data placeholder once data exists."""
+    lines = [
+        "",
+        "## Extraction evals",
+        "",
+        (
+            f"{extraction['total_items']} golden items · {extraction['errors']} errors · "
+            f"tp {extraction['tp']} / fp {extraction['fp']} / fn {extraction['fn']}"
+        ),
+        "",
+        "| metric | value |",
+        "|---|---|",
+        f"| precision | {_pct(extraction['precision'])} |",
+        f"| recall | {_pct(extraction['recall'])} |",
+        f"| F1 | {_pct(extraction['f1'])} |",
+        "",
+        (
+            "Matching is exact on canonicalized (subject, relation, object): relation "
+            "synonyms (ANNOUNCED vs STATED) count as misses by design — track the trend, "
+            "not the absolute value. — means undefined (zero-division guarded)."
+        ),
+    ]
+    per_relation = extraction.get("per_relation") or {}
+    if per_relation:
+        lines += [
+            "",
+            "| relation | tp | fp | fn | precision | recall | f1 |",
+            "|---|---|---|---|---|---|---|",
+        ]
+        for relation, stats in sorted(per_relation.items()):
+            lines.append(
+                f"| {_md_escape(relation)} | {stats['tp']} | {stats['fp']} | {stats['fn']} "
+                f"| {_pct(stats['precision'])} | {_pct(stats['recall'])} "
+                f"| {_pct(stats['f1'])} |"
+            )
+    return lines
+
+
 def _failure_rows(summary: dict) -> list[str]:
     rows: list[str] = []
-    for question in summary["questions"]:
+    for question in summary.get("questions", []):
         if question["passed"]:
             continue
         failures = "; ".join(question["failures"]) or "failed"
@@ -408,6 +503,7 @@ def build_evals_md(
     prepended); `thresholds` is the parsed evals/thresholds.json when present."""
     ran_at = summary["ran_at"][:16].replace("T", " ")
     faith = summary.get("faithfulness")
+    extraction = summary.get("extraction")
 
     lines: list[str] = [
         "# zeitgeist Evals",
@@ -426,16 +522,23 @@ def build_evals_md(
         "",
         "| suite | score | questions | llm calls |",
         "|---|---|---|---|",
-        (
+    ]
+    if "pass_rate" in summary:
+        lines.append(
             f"| retrieval | {summary['pass_rate']:.2%} | {summary['passed']}/{summary['total']} "
             f"passed | {summary['llm_calls']} |"
-        ),
-    ]
+        )
     if faith is not None:
         lines.append(
             f"| faithfulness | {faith['faithfulness_rate']:.2%} | "
             f"{faith['supported']}/{faith['judged']} supported | {faith['llm_calls']} |"
         )
+    if extraction is not None:
+        lines.append(
+            f"| extraction | F1 {_pct(extraction['f1'])} | {extraction['total_items']} items "
+            f"| {extraction['llm_calls']} |"
+        )
+    if faith is not None:
         lines += ["", f"Judge errors: {faith['judge_errors']}"]
 
     lines += ["", "## Thresholds", ""]
@@ -453,7 +556,11 @@ def build_evals_md(
     else:
         lines.append("All questions passed.")
 
-    total_calls = summary["llm_calls"] + (faith["llm_calls"] if faith else 0)
+    total_calls = (
+        summary.get("llm_calls", 0)
+        + (faith["llm_calls"] if faith else 0)
+        + (extraction["llm_calls"] if extraction else 0)
+    )
     cost = total_calls * APPROX_COST_PER_CALL_USD
     lines += [
         "",
@@ -470,16 +577,21 @@ def build_evals_md(
         "|---|---|---|---|",
         _history_row(summary, notes),
         *parse_history_rows(existing or ""),
-        "",
-        "## Extraction evals",
-        "",
-        (
-            "Extraction evals: pending golden data (Task 5) — the Task 1 archiver is "
-            "accumulating extraction inputs; per-relation precision/recall lands once "
-            "labeled pairs exist."
-        ),
-        "",
     ]
+    if extraction is not None:
+        lines += _extraction_section(extraction)
+    else:
+        lines += [
+            "",
+            "## Extraction evals",
+            "",
+            (
+                "Extraction evals: pending golden data (Task 5) — the Task 1 archiver is "
+                "accumulating extraction inputs; per-relation precision/recall lands once "
+                "labeled pairs exist."
+            ),
+        ]
+    lines.append("")
     return "\n".join(lines)
 
 
@@ -503,38 +615,12 @@ def write_evals_md(
     )
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="python -m zeitgeist.evals.runner")
-    parser.add_argument("--suite", required=True, choices=["retrieval", "faithfulness", "all"])
-    parser.add_argument("--golden", type=Path, default=DEFAULT_GOLDEN)
-    parser.add_argument("--limit", type=int, default=None)
-    args = parser.parse_args(argv)
-
-    # Faithfulness grades the answers synthesized from retrieval's executed
-    # records, so retrieval always runs; --suite picks what is reported/gated.
-    gate_retrieval = args.suite in ("retrieval", "all")
-    run_faith = args.suite in ("faithfulness", "all")
-
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        print(
-            "ANTHROPIC_API_KEY is not set. The eval suites generate real "
-            "Cypher/answers through the API; set the key and re-run.",
-            file=sys.stderr,
-        )
-        return 2
-
-    questions = load_golden(args.golden)
-    if args.limit is not None:
-        questions = questions[: args.limit]
-
-    import anthropic  # deferred with the other heavy deps
-
-    model = os.environ.get("LLM_MODEL", DEFAULT_MODEL)
-    client = anthropic.Anthropic(api_key=api_key)
-    agent = QueryAgent(client, model=model)
-    judge = FaithfulnessJudge(client, model=model) if run_faith else None
-
+def _run_retrieval_leg(
+    agent, judge, questions: list[dict], run_faith: bool
+) -> tuple[list[tuple[QuestionResult, list[dict]]], list[FaithfulnessResult]]:
+    """Retrieval (and optionally faithfulness) against a throwaway seeded
+    Neo4j container. Heavy deps imported here so an extraction-only run never
+    touches testcontainers."""
     from neo4j import GraphDatabase
     from testcontainers.community.neo4j import Neo4jContainer
 
@@ -573,28 +659,118 @@ def main(argv: list[str] | None = None) -> int:
                         print(format_faithfulness_line(faithfulness_result))
         finally:
             driver.close()
+    return retrieval_results, faithfulness_results
 
-    results = [result for result, _records in retrieval_results]
-    summary = summarize(results, suite=args.suite, model=model)
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="python -m zeitgeist.evals.runner")
+    parser.add_argument(
+        "--suite", required=True, choices=["retrieval", "faithfulness", "extraction", "all"]
+    )
+    parser.add_argument("--golden", type=Path, default=DEFAULT_GOLDEN)
+    parser.add_argument("--golden-extraction", type=Path, default=DEFAULT_GOLDEN_EXTRACTION)
+    parser.add_argument("--limit", type=int, default=None)
+    args = parser.parse_args(argv)
+
+    # Faithfulness grades the answers synthesized from retrieval's executed
+    # records, so retrieval runs for both legs; --suite picks what is
+    # reported/gated. The extraction leg is container-free and independent.
+    gate_retrieval = args.suite in ("retrieval", "all")
+    run_retrieval = args.suite in ("retrieval", "faithfulness", "all")
+    run_faith = args.suite in ("faithfulness", "all")
+    run_extract = args.suite in ("extraction", "all")
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        print(
+            "ANTHROPIC_API_KEY is not set. The eval suites generate real "
+            "Cypher/answers through the API; set the key and re-run.",
+            file=sys.stderr,
+        )
+        return 2
+
+    extraction_rows: list[dict] | None = None
+    if run_extract:
+        extraction_rows = load_extraction_rows(args.golden_extraction)
+        if extraction_rows is None:
+            if args.suite == "extraction":
+                return 0  # graceful: notice printed, nothing to gate
+            run_extract = False  # --suite all continues without the leg
+        elif args.limit is not None:
+            extraction_rows = extraction_rows[: args.limit]
+
+    import anthropic  # deferred with the other heavy deps
+
+    model = os.environ.get("LLM_MODEL", DEFAULT_MODEL)
+    client = anthropic.Anthropic(api_key=api_key)
+
+    retrieval_results: list[tuple[QuestionResult, list[dict]]] = []
+    faithfulness_results: list[FaithfulnessResult] = []
+    if run_retrieval:
+        questions = load_golden(args.golden)
+        if args.limit is not None:
+            questions = questions[: args.limit]
+        agent = QueryAgent(client, model=model)
+        judge = FaithfulnessJudge(client, model=model) if run_faith else None
+        retrieval_results, faithfulness_results = _run_retrieval_leg(
+            agent, judge, questions, run_faith
+        )
+
+    extraction_summary: dict | None = None
+    if run_extract:
+        from zeitgeist.llm.extract import LlmExtractor
+
+        print("\nextraction (golden labeled articles):")
+        extractor = LlmExtractor(client, model=model)
+        items = run_extraction(extractor, extraction_rows)
+        for item in items:
+            print(format_extraction_line(item))
+        extraction_summary = summarize_extraction(items)
+
     rates: dict[str, float] = {}
-    if gate_retrieval:
-        rates["retrieval_pass_rate"] = summary["pass_rate"]
-    if run_faith:
-        faith_summary = summarize_faithfulness(faithfulness_results)
-        summary["faithfulness"] = faith_summary
-        rates["faithfulness_rate"] = faith_summary["faithfulness_rate"]
+    if run_retrieval:
+        results = [result for result, _records in retrieval_results]
+        summary = summarize(results, suite=args.suite, model=model)
+        if gate_retrieval:
+            rates["retrieval_pass_rate"] = summary["pass_rate"]
+        if run_faith:
+            faith_summary = summarize_faithfulness(faithfulness_results)
+            summary["faithfulness"] = faith_summary
+            rates["faithfulness_rate"] = faith_summary["faithfulness_rate"]
+    else:
+        summary = {
+            "suite": args.suite,
+            "model": model,
+            "ran_at": datetime.now(UTC).isoformat(),
+        }
+    if extraction_summary is not None:
+        summary["extraction"] = extraction_summary
+        if extraction_summary["f1"] is not None:
+            rates["extraction_f1"] = extraction_summary["f1"]
 
     results_path = write_results(summary)
-    print(
-        f"\nretrieval: {summary['passed']}/{summary['total']} passed "
-        f"(pass rate {summary['pass_rate']:.2%}), {summary['llm_calls']} llm calls"
-    )
+    if run_retrieval:
+        print(
+            f"\nretrieval: {summary['passed']}/{summary['total']} passed "
+            f"(pass rate {summary['pass_rate']:.2%}), {summary['llm_calls']} llm calls"
+        )
     if run_faith:
         print(
             f"faithfulness: {faith_summary['supported']}/{faith_summary['judged']} supported "
             f"(rate {faith_summary['faithfulness_rate']:.2%}), "
             f"{faith_summary['judge_errors']} judge errors, "
             f"{faith_summary['llm_calls']} llm calls"
+        )
+    if extraction_summary is not None:
+        print(
+            f"extraction: {extraction_summary['total_items']} items "
+            f"(tp {extraction_summary['tp']} / fp {extraction_summary['fp']} "
+            f"/ fn {extraction_summary['fn']}), "
+            f"precision {_pct(extraction_summary['precision'])}, "
+            f"recall {_pct(extraction_summary['recall'])}, "
+            f"F1 {_pct(extraction_summary['f1'])}, "
+            f"{extraction_summary['errors']} errors, "
+            f"{extraction_summary['llm_calls']} llm calls"
         )
     print(f"results written to {results_path}")
     write_evals_md(summary, notes=f"--suite {args.suite} run")
